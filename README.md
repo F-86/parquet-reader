@@ -11,7 +11,12 @@
 - 数据表视图展示当前页数据。
 - Schema 视图展示字段名和类型信息。
 - 支持 vim/k9s 风格快捷键导航。
-- 支持筛选输入、筛选重置和状态栏反馈。
+- 顶部 tab 栏显示当前 Parquet 文件，后续可扩展为多文件 tabs。
+- 左侧文件列表以程序运行目录为根目录，贯穿屏幕顶部到底部，便于在 TUI 内选择 Parquet 文件。
+- 整体布局参考 LazyVim：左侧文件树 + 右侧内容区 + 顶部 tab 栏。
+- 常驻 key hints 不显示；按 `h` 打开 btop 风格帮助弹窗。
+- 筛选输入不常驻占位，按 `/` 打开覆盖式筛选弹窗。
+- 支持筛选输入、筛选重置和状态栏反馈；筛选后 status 栏显示当前条件。
 
 ## 项目状态
 
@@ -35,13 +40,13 @@ uv run --group dev parquet_tui.py --ds path/to/file.parquet
 
 ### 运行 Rust 版本
 
-Rust 版本的 TUI 功能仍在实现中。当前可以先验证项目能否编译：
+Rust 版本的 TUI 功能仍在实现中。设计上支持两种启动方式：启动时传入文件路径，或不带路径进入 TUI 后通过左侧文件列表选择文件；`d` 用于聚焦文件列表。当前可以先验证项目能否编译：
 
 ```bash
 cargo check
 ```
 
-<!-- TODO: Rust CLI 实现后补充正式运行命令，例如 cargo run -- --ds path/to/file.parquet。 -->
+<!-- TODO: Rust CLI 实现后补充正式运行命令，例如 cargo run -- path/to/file.parquet 或 cargo run 后在左侧文件列表选择文件。 -->
 
 ## 文档
 
