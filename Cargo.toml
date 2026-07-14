@@ -28,3 +28,6 @@ path = "src/bin/generate_empty_test_parquet.rs"
 [[bin]]
 name = "generate-complex-test-parquet"
 path = "src/bin/generate_complex_test_parquet.rs"
+[[bin]]
+name = "generate-pagination-test-parquet"
+path = "src/bin/generate_pagination_test_parquet.rs"
