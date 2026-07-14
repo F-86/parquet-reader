@@ -350,6 +350,22 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
         return;
     }
 
+    if app.view == ViewMode::Schema {
+        match key.code {
+            KeyCode::Char('q') => app.should_quit = true,
+            KeyCode::Char('h') => app.show_help = true,
+            KeyCode::Char('s') => app.toggle_schema_view(),
+            KeyCode::Up | KeyCode::Char('k') => app.select_schema_row_previous(),
+            KeyCode::Down | KeyCode::Char('j') => app.select_schema_row_next(),
+            KeyCode::Char('K') => app.select_schema_row_top(),
+            KeyCode::Char('J') => app.select_schema_row_bottom(),
+            KeyCode::Char('y') => copy_schema_field(app),
+            KeyCode::Char('Y') => copy_schema_field(app),
+            _ => {}
+        }
+        return;
+    }
+
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Char('h') => app.show_help = true,
@@ -382,6 +398,34 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
         KeyCode::Char('y') => copy_selected_cell(app),
         KeyCode::Char('Y') => copy_selected_row(app),
         _ => {}
+    }
+}
+
+fn copy_schema_field(app: &mut AppState) {
+    let Some(column) = app.columns.get(app.selected_schema_row) else {
+        app.status = "No field selected".to_string();
+        return;
+    };
+    let value = format!(
+        "{}\nname: {}\ntype: {}\nphysical: {}",
+        column.index,
+        column.name,
+        column.logical_type,
+        column
+            .physical_type
+            .clone()
+            .unwrap_or_else(|| "-".to_string()),
+    );
+    let encoded = general_purpose::STANDARD.encode(value.as_bytes());
+    let sequence = format!("\x1b]52;c;{encoded}\x07");
+    match io::stdout()
+        .write_all(sequence.as_bytes())
+        .and_then(|_| io::stdout().flush())
+    {
+        Ok(()) => {
+            app.status = format!("Copied field '{}' to clipboard", column.name);
+        }
+        Err(error) => app.set_error(format!("failed to copy field: {error}")),
     }
 }
 

@@ -1087,6 +1087,31 @@ mod tests {
     }
 
     #[test]
+    fn schema_view_navigates_schema_rows_independently() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        set_columns(&mut state, &["a", "b", "c", "d", "e"]);
+        state.rows = vec![single_row(); 3];
+        state.selected_row = 2;
+        state.toggle_schema_view();
+        assert_eq!(state.view, ViewMode::Schema);
+
+        // Schema navigation must not move the data-row selection.
+        state.select_schema_row_next();
+        assert_eq!(state.selected_schema_row, 1);
+        assert_eq!(state.selected_row, 2);
+
+        state.select_schema_row_bottom();
+        assert_eq!(state.selected_schema_row, 4);
+        assert_eq!(state.selected_row, 2);
+
+        // Returning to Data view keeps the data-row selection intact.
+        state.toggle_schema_view();
+        assert_eq!(state.view, ViewMode::Data);
+        assert_eq!(state.selected_row, 2);
+    }
+
+    #[test]
     fn schema_row_selection_stays_in_bounds() {
         let mut state = test_state();
         state.active_file = Some(PathBuf::from("file.parquet"));
