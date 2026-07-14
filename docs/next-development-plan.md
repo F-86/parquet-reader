@@ -1,6 +1,6 @@
 # parquet-reader 剩余开发计划
 
-> 最后更新：2026-07-14（R1 完成）
+> 最后更新：2026-07-14（R3 完成）
 > 说明：本文件现在只保留**截至当前仍未完成**的事项；原先已经完成的 P1-P5 内容已不再重复展开。
 
 本文档面向继续接手实现的 AI coding agent，用来回答两件事：
@@ -51,6 +51,13 @@
   - `n` / `N` 前/后跳转
   - 自动滚动到当前匹配
   - 无匹配短状态提示
+- R3：状态机与 TUI 解耦
+  - 新增 `src/action.rs`：`Action`、`DataCommand`、`InputMode` 枚举和纯函数 `key_to_action`
+  - `AppState::input_mode()` 从状态派生当前输入模式
+  - `AppState::handle_action()` 处理纯状态变更，需要 I/O 时返回 `DataCommand`
+  - TUI 层 `handle_key` 简化为 `key_to_action → handle_action → execute_data_command`
+  - OSC 52 剪贴板逻辑集中到 `execute_data_command`
+  - 25 个 `action` 模块测试覆盖所有输入模式的按键映射
 
 当前实现仍遵守以下长期约束：
 
@@ -149,90 +156,6 @@ Evaluate DataFusion as an optional filter backend
 
 ---
 
-## R3：状态机与 TUI 解耦（原 P5.3）
-
-### 目标
-
-进一步把“事件解释”和“状态变更”从 TUI 层抽离，让：
-
-- TUI 只负责事件采集、布局和渲染；
-- AppState 负责状态迁移；
-- Data Access 负责执行读取命令。
-
-### 当前情况
-
-虽然当前分层已经比早期清晰很多，但 TUI 里仍然有较多按键分支直接驱动应用行为。长期看，这会增加：
-
-- 行为测试难度；
-- 快捷键改动成本；
-- 视图模式分支复杂度；
-- 新增交互时的回归风险。
-
-### 目标形态
-
-建议逐步收敛到：
-
-```rust
-enum Action
-enum DataCommand
-```
-
-方向：
-
-- TUI：`event -> Action`
-- AppState：`handle_action(action) -> Option<DataCommand>`
-- 外层协调：执行 `DataCommand` 并把结果回写 AppState
-
-### 建议拆分
-
-#### R3.1 提取 Action
-
-- 先把键盘事件映射提取成纯函数；
-- 不要一开始就重写所有分支；
-- 先覆盖最稳定的主路径：
-  - 翻页
-  - 行列移动
-  - schema/data 切换
-  - 排序
-  - 导出
-
-#### R3.2 AppState handle_action
-
-- 把纯状态变更移动到 AppState；
-- 对需要读取数据的动作返回 `DataCommand`；
-- 保持错误信息仍由 AppState 持有。
-
-#### R3.3 为 Action 层补测试
-
-- 每个 Action 至少验证：
-  - 前置条件
-  - 状态变化
-  - 是否发出正确的 `DataCommand`
-
-### 注意事项
-
-- 不要一次性重写全部 TUI 事件分支；
-- 不要把 Arrow / parquet 具体类型引进 TUI；
-- 不要破坏现有快捷键语义，尤其：
-  - `h` 继续保留给帮助
-  - `←` 继续是左移，不把 `h` 绑定回左移
-
-### 验收
-
-```bash
-cargo fmt
-cargo check --offline
-cargo test --offline
-```
-
-### 建议提交信息
-
-```text
-Decouple actions from the TUI event layer
-```
-
----
-
 ## 可继续但不属于原始 P1-P5 主线的增强项
 
 这些不是当前必须项，但如果用户继续要求“再往前推进”，优先从这里挑小步工作。
@@ -269,19 +192,19 @@ Decouple actions from the TUI event layer
 建议按以下顺序继续：
 
 ```text
-R1 ✅ > R3 > R2
+R1 ✅ > R3 ✅ > R2
 ```
 
 原因：
 
 - **R1** 已完成：Cell Detail 内搜索已落地；
-- **R3** 是长期维护性收益最大的重构；
+- **R3** 已完成：状态机与 TUI 解耦已落地；
 - **R2** 风险最高，适合在行为和分层更稳定后推进。
 
-如果要先做一个最小可交付增强，优先选：
+如果要继续推进，优先选：
 
 ```text
-R3：状态机与 TUI 解耦
+R2：筛选下推 / 筛选执行模型升级
 ```
 
 ---

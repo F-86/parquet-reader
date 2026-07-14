@@ -7,8 +7,8 @@ use std::{
 use base64::{Engine as _, engine::general_purpose};
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-        MouseButton, MouseEvent, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -23,6 +23,7 @@ use ratatui::{
 };
 
 use crate::{
+    action::{DataCommand, key_to_action},
     app::{AppState, SidebarOpenResult, ViewMode},
     cli::AppConfig,
     data::{ParquetFileDataSource, validate_parquet_readable},
@@ -262,246 +263,66 @@ fn handle_table_click(app: &mut AppState, column: u16, row: u16) {
     );
 }
 
+/// Handle a keyboard event: map it to an [`Action`] via the pure
+/// [`key_to_action`] function, then delegate to [`AppState::handle_action`].
+/// If a [`DataCommand`] is returned, execute it via [`execute_data_command`].
 fn handle_key(app: &mut AppState, key: KeyEvent) {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
-        app.should_quit = true;
+    let mode = app.input_mode();
+    let Some(action) = key_to_action(key, mode) else {
         return;
+    };
+    if let Some(command) = app.handle_action(&action) {
+        execute_data_command(app, command);
     }
+}
 
-    if app.show_cell_detail {
-        if app.detail_search_active {
-            match key.code {
-                KeyCode::Esc => app.cancel_detail_search(),
-                KeyCode::Enter => app.execute_detail_search(),
-                KeyCode::Backspace => app.backspace_detail_search_char(),
-                KeyCode::Char(ch) => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        match ch {
-                            'u' => {
-                                app.detail_search_input.clear();
-                                app.detail_search_cursor = 0;
-                            }
-                            'c' => app.should_quit = true,
-                            _ => {}
-                        }
-                    } else {
-                        app.insert_detail_search_char(ch);
-                    }
+/// Execute a [`DataCommand`] produced by [`AppState::handle_action`].
+///
+/// This is the I/O boundary: all Parquet reads, clipboard writes, and file
+/// operations that the pure state layer cannot perform are dispatched here.
+/// Results are written back into `AppState`.
+fn execute_data_command(app: &mut AppState, command: DataCommand) {
+    match command {
+        DataCommand::LoadFile(path) => load_file(app, path),
+        DataCommand::LoadPage { offset } => load_page(app, offset),
+        DataCommand::ApplyFilterAndLoad {
+            path,
+            previous_filter,
+        } => {
+            let data_source = ParquetFileDataSource::new(path);
+            match data_source.read_page_with_filter(0, app.page_size, app.filter.as_deref()) {
+                Ok(page) => app.replace_active_page(page),
+                Err(error) => {
+                    app.filter = previous_filter;
+                    app.set_error(error.to_string());
                 }
-                _ => {}
-            }
-            return;
-        }
-
-        match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
-                app.show_cell_detail = false;
-                app.reset_detail_search();
-            }
-            KeyCode::Char('q') => app.should_quit = true,
-            KeyCode::Char('/') => app.start_detail_search(),
-            KeyCode::Char('n') => app.next_detail_search_match(),
-            KeyCode::Char('N') => app.previous_detail_search_match(),
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.cell_detail_scroll = app.cell_detail_scroll.saturating_sub(1)
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                app.cell_detail_scroll = app.cell_detail_scroll.saturating_add(1)
-            }
-            KeyCode::PageUp => app.cell_detail_scroll = app.cell_detail_scroll.saturating_sub(8),
-            KeyCode::PageDown => app.cell_detail_scroll = app.cell_detail_scroll.saturating_add(8),
-            KeyCode::Home => app.cell_detail_scroll = 0,
-            KeyCode::Char('y') => copy_selected_cell(app),
-            KeyCode::Char('Y') => copy_selected_row(app),
-            _ => {}
-        }
-        return;
-    }
-
-    if app.show_help {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('h') => app.show_help = false,
-            KeyCode::Char('q') => app.should_quit = true,
-            _ => {}
-        }
-        return;
-    }
-
-    if app.show_filter_popup {
-        match key.code {
-            KeyCode::Esc => app.cancel_filter_popup(),
-            KeyCode::Enter => apply_filter(app),
-            KeyCode::Backspace => app.backspace_filter_char(),
-            KeyCode::Delete => app.delete_filter_char(),
-            KeyCode::Left => app.move_filter_cursor_left(),
-            KeyCode::Right => app.move_filter_cursor_right(),
-            KeyCode::Home => app.move_filter_cursor_home(),
-            KeyCode::End => app.move_filter_cursor_end(),
-            KeyCode::Tab => app.complete_filter_field(false),
-            KeyCode::BackTab => app.complete_filter_field(true),
-            KeyCode::Up => app.previous_filter_history(),
-            KeyCode::Down => app.next_filter_history(),
-            KeyCode::Char(ch) => app.insert_filter_char(ch),
-            _ => {}
-        }
-        return;
-    }
-
-    if app.view == ViewMode::Schema {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => app.should_quit = true,
-            KeyCode::Char('h') => app.show_help = true,
-            KeyCode::Char('s') => app.toggle_schema_view(),
-            KeyCode::Up | KeyCode::Char('k') => app.select_schema_row_previous(),
-            KeyCode::Down | KeyCode::Char('j') => app.select_schema_row_next(),
-            KeyCode::Char('K') => app.select_schema_row_top(),
-            KeyCode::Char('J') => app.select_schema_row_bottom(),
-            KeyCode::Char('y') => copy_selected_cell(app),
-            KeyCode::Char('Y') => copy_selected_row(app),
-            _ => {}
-        }
-        return;
-    }
-
-    if app.sidebar.focused {
-        match key.code {
-            KeyCode::Esc => app.sidebar.focused = false,
-            KeyCode::Char('q') => app.should_quit = true,
-            KeyCode::Char('h') => app.show_help = true,
-            KeyCode::Up | KeyCode::Char('k') => app.sidebar.select_previous(),
-            KeyCode::Down | KeyCode::Char('j') => app.sidebar.select_next(),
-            KeyCode::Enter => match app.open_selected_sidebar_entry() {
-                Ok(SidebarOpenResult::File(path)) => load_file(app, path),
-                Ok(SidebarOpenResult::None) => {}
-                Err(error) => app.set_error(error.to_string()),
-            },
-            _ => {}
-        }
-        return;
-    }
-
-    if app.view == ViewMode::Schema {
-        match key.code {
-            KeyCode::Char('q') => app.should_quit = true,
-            KeyCode::Char('h') => app.show_help = true,
-            KeyCode::Char('s') => app.toggle_schema_view(),
-            KeyCode::Up | KeyCode::Char('k') => app.select_schema_row_previous(),
-            KeyCode::Down | KeyCode::Char('j') => app.select_schema_row_next(),
-            KeyCode::Char('K') => app.select_schema_row_top(),
-            KeyCode::Char('J') => app.select_schema_row_bottom(),
-            KeyCode::Char('y') => copy_schema_field(app),
-            KeyCode::Char('Y') => copy_schema_field(app),
-            _ => {}
-        }
-        return;
-    }
-
-    match key.code {
-        KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Char('h') => app.show_help = true,
-        KeyCode::Char('d') => {
-            app.sidebar.focused = true;
-            if let Err(error) = app.sidebar.refresh() {
-                app.set_error(error.to_string());
             }
         }
-        KeyCode::Char('s') => app.toggle_schema_view(),
-        KeyCode::Char('/') => app.open_filter_popup(),
-        KeyCode::Char('r') => reset_filter(app),
-        KeyCode::Char('c') => app.count_current_filter(),
-        KeyCode::Char('e') => app.export_current_page_csv(),
-        KeyCode::Char('o') => app.sort_by_column(app.selected_col),
-        KeyCode::Char('O') => app.toggle_sort_direction(),
-        KeyCode::Up | KeyCode::Char('k') => app.select_row_previous(),
-        KeyCode::Down | KeyCode::Char('j') => app.select_row_next(),
-        KeyCode::Char('K') => app.select_row_top(),
-        KeyCode::Char('J') => app.select_row_bottom(),
-        KeyCode::Left => app.select_col_previous(),
-        KeyCode::Right | KeyCode::Char('l') => app.select_col_next(),
-        KeyCode::Char('H') => app.select_first_col(),
-        KeyCode::Char('L') => app.select_last_col(),
-        KeyCode::Tab => app.next_tab(),
-        KeyCode::BackTab => app.previous_tab(),
-        KeyCode::Char('n') | KeyCode::PageDown => load_next_page(app),
-        KeyCode::Char('p') | KeyCode::PageUp => load_previous_page(app),
-        KeyCode::Enter | KeyCode::Char(' ') => app.open_cell_detail(),
-        KeyCode::Char('y') => copy_selected_cell(app),
-        KeyCode::Char('Y') => copy_selected_row(app),
-        _ => {}
-    }
-}
-
-fn copy_schema_field(app: &mut AppState) {
-    let Some(column) = app.columns.get(app.selected_schema_row) else {
-        app.status = "No field selected".to_string();
-        return;
-    };
-    let value = format!(
-        "{}\nname: {}\ntype: {}\nphysical: {}",
-        column.index,
-        column.name,
-        column.logical_type,
-        column
-            .physical_type
-            .clone()
-            .unwrap_or_else(|| "-".to_string()),
-    );
-    let encoded = general_purpose::STANDARD.encode(value.as_bytes());
-    let sequence = format!("\x1b]52;c;{encoded}\x07");
-    match io::stdout()
-        .write_all(sequence.as_bytes())
-        .and_then(|_| io::stdout().flush())
-    {
-        Ok(()) => {
-            app.status = format!("Copied field '{}' to clipboard", column.name);
+        DataCommand::CountFilter(path) => {
+            let data_source = ParquetFileDataSource::new(path);
+            match data_source.count_with_filter(app.filter.as_deref()) {
+                Ok(count) => {
+                    app.count_state = crate::app::CountState::Known(count);
+                    let filter = app.filter_display();
+                    app.status = format!("Count for filter '{filter}': {count} rows");
+                }
+                Err(error) => {
+                    app.count_state = crate::app::CountState::Failed(error.to_string());
+                    app.set_error(error.to_string());
+                }
+            }
         }
-        Err(error) => app.set_error(format!("failed to copy field: {error}")),
-    }
-}
-
-fn copy_selected_cell(app: &mut AppState) {
-    let Some(value) = app.selected_cell_value() else {
-        app.status = "No cell selected".to_string();
-        return;
-    };
-
-    let encoded = general_purpose::STANDARD.encode(value.as_bytes());
-    let sequence = format!("\x1b]52;c;{encoded}\x07");
-    match io::stdout()
-        .write_all(sequence.as_bytes())
-        .and_then(|_| io::stdout().flush())
-    {
-        Ok(()) => {
-            app.status = format!(
-                "Copied row {}, column {} to clipboard",
-                app.selected_row + 1,
-                app.selected_col + 1
-            );
+        DataCommand::CopyToClipboard { value, message } => {
+            let encoded = general_purpose::STANDARD.encode(value.as_bytes());
+            let sequence = format!("\x1b]52;c;{encoded}\x07");
+            match io::stdout()
+                .write_all(sequence.as_bytes())
+                .and_then(|_| io::stdout().flush())
+            {
+                Ok(()) => app.status = message,
+                Err(error) => app.set_error(format!("failed to copy: {error}")),
+            }
         }
-        Err(error) => app.set_error(format!("failed to copy cell: {error}")),
-    }
-}
-
-fn copy_selected_row(app: &mut AppState) {
-    let Some(value) = app.selected_row_detail_json() else {
-        app.status = "No row selected".to_string();
-        return;
-    };
-
-    let encoded = general_purpose::STANDARD.encode(value.as_bytes());
-    let sequence = format!("]52;c;{encoded}");
-    match io::stdout()
-        .write_all(sequence.as_bytes())
-        .and_then(|_| io::stdout().flush())
-    {
-        Ok(()) => {
-            app.status = format!(
-                "Copied row {} ({} fields) to clipboard",
-                app.selected_row + 1,
-                app.columns.len()
-            );
-        }
-        Err(error) => app.set_error(format!("failed to copy row: {error}")),
     }
 }
 
@@ -750,32 +571,6 @@ fn highlight_line(line: &str) -> Vec<Span<'static>> {
         index += ch_len;
     }
     spans
-}
-
-fn apply_filter(app: &mut AppState) {
-    let previous_filter = app.filter.clone();
-    let _ = app.set_filter_from_input();
-    let Some(path) = app.current_file_path() else {
-        app.status = "No file opened".to_string();
-        return;
-    };
-    let data_source = ParquetFileDataSource::new(path);
-    match data_source.read_page_with_filter(0, app.page_size, app.filter.as_deref()) {
-        Ok(page) => app.replace_active_page(page),
-        Err(error) => {
-            app.filter = previous_filter;
-            app.set_error(error.to_string());
-        }
-    }
-}
-
-fn reset_filter(app: &mut AppState) {
-    if app.filter.is_none() {
-        app.status = "No filter to reset".to_string();
-        return;
-    }
-    app.reset_filter();
-    load_page(app, 0);
 }
 
 fn load_file(app: &mut AppState, path: PathBuf) {

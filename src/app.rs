@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::{
+    action::{Action, DataCommand, InputMode},
     cli::AppConfig,
     data::{ColumnInfo, DataPage, RowView},
     error::Result,
@@ -805,8 +806,6 @@ impl AppState {
         self.filter_cursor = self.filter_input.len();
     }
 
-    /// Count rows matching the active filter by scanning the file. The result
-    /// is shown in the status bar; failures are surfaced as actionable errors.
     /// Write the current page (header + rows) to a CSV file under the system
     /// temp directory and report the path in the status bar. Failures surface
     /// as actionable errors. Only the currently loaded page is exported, since
@@ -863,6 +862,9 @@ impl AppState {
         self.status = format!("Exported page to {}", path.display());
     }
 
+    /// Count rows matching the active filter by scanning the file. The result
+    /// is shown in the status bar; failures are surfaced as actionable errors.
+    #[allow(dead_code)]
     pub fn count_current_filter(&mut self) {
         let Some(path) = self.current_file_path() else {
             self.status = "No file opened".to_string();
@@ -1089,6 +1091,369 @@ impl AppState {
 
     pub fn active_file_path(&self) -> Option<&Path> {
         self.active_file.as_deref()
+    }
+
+    /// Derive the current [`InputMode`] from application state.
+    ///
+    /// This mirrors the priority order of the pre-refactoring `handle_key`:
+    /// cell-detail search > cell-detail > help > filter-popup > schema view
+    /// > sidebar focus > data.
+    pub fn input_mode(&self) -> InputMode {
+        if self.show_cell_detail {
+            if self.detail_search_active {
+                InputMode::DetailSearch
+            } else {
+                InputMode::CellDetail
+            }
+        } else if self.show_help {
+            InputMode::Help
+        } else if self.show_filter_popup {
+            InputMode::FilterPopup
+        } else if self.view == ViewMode::Schema {
+            InputMode::SchemaView
+        } else if self.sidebar.focused {
+            InputMode::SidebarFocused
+        } else {
+            InputMode::Data
+        }
+    }
+
+    /// Process an [`Action`] and optionally produce a [`DataCommand`] for the
+    /// I/O layer to execute.
+    ///
+    /// Pure state transitions are handled here.  Actions requiring file I/O,
+    /// clipboard writes, or Parquet reads return a `DataCommand` that the
+    /// TUI run-loop executes and then writes results back.
+    pub fn handle_action(&mut self, action: &Action) -> Option<DataCommand> {
+        match action {
+            // ── Global ──
+            Action::Quit => {
+                self.should_quit = true;
+                None
+            }
+            Action::ToggleHelp => {
+                self.show_help = !self.show_help;
+                None
+            }
+
+            // ── Data view navigation ──
+            Action::SelectRowPrevious => {
+                self.select_row_previous();
+                None
+            }
+            Action::SelectRowNext => {
+                self.select_row_next();
+                None
+            }
+            Action::SelectRowTop => {
+                self.select_row_top();
+                None
+            }
+            Action::SelectRowBottom => {
+                self.select_row_bottom();
+                None
+            }
+            Action::SelectColPrevious => {
+                self.select_col_previous();
+                None
+            }
+            Action::SelectColNext => {
+                self.select_col_next();
+                None
+            }
+            Action::SelectFirstCol => {
+                self.select_first_col();
+                None
+            }
+            Action::SelectLastCol => {
+                self.select_last_col();
+                None
+            }
+            Action::NextPage => self
+                .next_page_offset()
+                .map(|offset| DataCommand::LoadPage { offset }),
+            Action::PreviousPage => self
+                .previous_page_offset()
+                .map(|offset| DataCommand::LoadPage { offset }),
+
+            // ── Schema view navigation ──
+            Action::SelectSchemaRowPrevious => {
+                self.select_schema_row_previous();
+                None
+            }
+            Action::SelectSchemaRowNext => {
+                self.select_schema_row_next();
+                None
+            }
+            Action::SelectSchemaRowTop => {
+                self.select_schema_row_top();
+                None
+            }
+            Action::SelectSchemaRowBottom => {
+                self.select_schema_row_bottom();
+                None
+            }
+
+            // ── View-mode switches ──
+            Action::ToggleSchemaView => {
+                self.toggle_schema_view();
+                None
+            }
+            Action::FocusSidebar => {
+                self.sidebar.focused = true;
+                if let Err(error) = self.sidebar.refresh() {
+                    self.set_error(error.to_string());
+                }
+                None
+            }
+            Action::OpenCellDetail => {
+                self.open_cell_detail();
+                None
+            }
+            Action::CloseCellDetail => {
+                self.show_cell_detail = false;
+                self.reset_detail_search();
+                None
+            }
+
+            // ── Tabs ──
+            Action::NextTab => {
+                self.next_tab();
+                None
+            }
+            Action::PreviousTab => {
+                self.previous_tab();
+                None
+            }
+
+            // ── Data operations ──
+            Action::OpenFilterPopup => {
+                self.open_filter_popup();
+                None
+            }
+            Action::ResetFilter => {
+                if self.filter.is_none() {
+                    self.status = "No filter to reset".to_string();
+                    None
+                } else {
+                    self.reset_filter();
+                    Some(DataCommand::LoadPage { offset: 0 })
+                }
+            }
+            Action::CountFilter => self.current_file_path().map(DataCommand::CountFilter),
+            Action::ExportPage => {
+                self.export_current_page_csv();
+                None
+            }
+            Action::SortByColumn => {
+                self.sort_by_column(self.selected_col);
+                None
+            }
+            Action::ToggleSortDirection => {
+                self.toggle_sort_direction();
+                None
+            }
+
+            // ── Copy (OSC 52) ──
+            // In schema view, both y and Y copy the selected schema field.
+            Action::CopyCell | Action::CopyRow if self.view == ViewMode::Schema => {
+                if let Some((value, message)) = self.schema_field_clipboard_value() {
+                    Some(DataCommand::CopyToClipboard { value, message })
+                } else {
+                    self.status = "No field selected".to_string();
+                    None
+                }
+            }
+            Action::CopyCell => {
+                if let Some(value) = self.selected_cell_value().map(|s| s.to_string()) {
+                    let row = self.selected_row + 1;
+                    let col = self.selected_col + 1;
+                    Some(DataCommand::CopyToClipboard {
+                        value,
+                        message: format!("Copied row {row}, column {col} to clipboard"),
+                    })
+                } else {
+                    self.status = "No cell selected".to_string();
+                    None
+                }
+            }
+            Action::CopyRow => {
+                if let Some(value) = self.selected_row_detail_json() {
+                    let row = self.selected_row + 1;
+                    let cols = self.columns.len();
+                    Some(DataCommand::CopyToClipboard {
+                        value,
+                        message: format!("Copied row {row} ({cols} fields) to clipboard"),
+                    })
+                } else {
+                    self.status = "No row selected".to_string();
+                    None
+                }
+            }
+
+            // ── Sidebar ──
+            Action::SidebarSelectPrevious => {
+                self.sidebar.select_previous();
+                None
+            }
+            Action::SidebarSelectNext => {
+                self.sidebar.select_next();
+                None
+            }
+            Action::SidebarOpenSelected => match self.open_selected_sidebar_entry() {
+                Ok(SidebarOpenResult::File(path)) => Some(DataCommand::LoadFile(path)),
+                Ok(SidebarOpenResult::None) => None,
+                Err(error) => {
+                    self.set_error(error.to_string());
+                    None
+                }
+            },
+            Action::SidebarUnfocus => {
+                self.sidebar.focused = false;
+                None
+            }
+
+            // ── Cell-detail scrolling ──
+            Action::DetailScrollUp => {
+                self.cell_detail_scroll = self.cell_detail_scroll.saturating_sub(1);
+                None
+            }
+            Action::DetailScrollDown => {
+                self.cell_detail_scroll = self.cell_detail_scroll.saturating_add(1);
+                None
+            }
+            Action::DetailScrollPageUp => {
+                self.cell_detail_scroll = self.cell_detail_scroll.saturating_sub(8);
+                None
+            }
+            Action::DetailScrollPageDown => {
+                self.cell_detail_scroll = self.cell_detail_scroll.saturating_add(8);
+                None
+            }
+            Action::DetailScrollHome => {
+                self.cell_detail_scroll = 0;
+                None
+            }
+
+            // ── Cell-detail search ──
+            Action::StartDetailSearch => {
+                self.start_detail_search();
+                None
+            }
+            Action::DetailSearchCancel => {
+                self.cancel_detail_search();
+                None
+            }
+            Action::DetailSearchExecute => {
+                self.execute_detail_search();
+                None
+            }
+            Action::DetailSearchBackspace => {
+                self.backspace_detail_search_char();
+                None
+            }
+            Action::DetailSearchInsertChar(ch) => {
+                self.insert_detail_search_char(*ch);
+                None
+            }
+            Action::DetailSearchClearInput => {
+                self.detail_search_input.clear();
+                self.detail_search_cursor = 0;
+                None
+            }
+            Action::NextDetailSearchMatch => {
+                self.next_detail_search_match();
+                None
+            }
+            Action::PreviousDetailSearchMatch => {
+                self.previous_detail_search_match();
+                None
+            }
+
+            // ── Filter popup ──
+            Action::FilterCancel => {
+                self.cancel_filter_popup();
+                None
+            }
+            Action::FilterApply => {
+                let previous_filter = self.filter.clone();
+                let _ = self.set_filter_from_input();
+                if let Some(path) = self.current_file_path() {
+                    Some(DataCommand::ApplyFilterAndLoad {
+                        path,
+                        previous_filter,
+                    })
+                } else {
+                    self.status = "No file opened".to_string();
+                    None
+                }
+            }
+            Action::FilterBackspace => {
+                self.backspace_filter_char();
+                None
+            }
+            Action::FilterDelete => {
+                self.delete_filter_char();
+                None
+            }
+            Action::FilterCursorLeft => {
+                self.move_filter_cursor_left();
+                None
+            }
+            Action::FilterCursorRight => {
+                self.move_filter_cursor_right();
+                None
+            }
+            Action::FilterCursorHome => {
+                self.move_filter_cursor_home();
+                None
+            }
+            Action::FilterCursorEnd => {
+                self.move_filter_cursor_end();
+                None
+            }
+            Action::FilterComplete => {
+                self.complete_filter_field(false);
+                None
+            }
+            Action::FilterCompleteReverse => {
+                self.complete_filter_field(true);
+                None
+            }
+            Action::FilterHistoryPrevious => {
+                self.previous_filter_history();
+                None
+            }
+            Action::FilterHistoryNext => {
+                self.next_filter_history();
+                None
+            }
+            Action::FilterInsertChar(ch) => {
+                self.insert_filter_char(*ch);
+                None
+            }
+        }
+    }
+
+    /// Expose the schema-field copy logic used in schema view.
+    ///
+    /// The pre-refactoring code had `copy_schema_field` in tui.rs that
+    /// duplicated the OSC 52 logic.  We centralize it here so that
+    /// `handle_action(CopyCell)` can reuse it in schema mode.
+    pub fn schema_field_clipboard_value(&self) -> Option<(String, String)> {
+        let column = self.columns.get(self.selected_schema_row)?;
+        let value = format!(
+            "{}\nname: {}\ntype: {}\nphysical: {}",
+            column.index,
+            column.name,
+            column.logical_type,
+            column
+                .physical_type
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
+        );
+        let message = format!("Copied field '{}' to clipboard", column.name);
+        Some((value, message))
     }
 }
 
