@@ -158,7 +158,7 @@ fn append_batch_rows(
     offset: usize,
     skipped: &mut usize,
     limit: usize,
-    filter: Option<&FilterExpr>,
+    filter: Option<&FilterAst>,
 ) {
     for row_index in 0..batch.num_rows() {
         if rows.len() >= limit {
@@ -228,6 +228,24 @@ impl FilterExpr {
     }
 }
 
+/// Boolean combination of predicates. `Or` binds looser than `And`, matching
+/// the precedence of the textual operators.
+enum FilterAst {
+    Predicate(FilterExpr),
+    And(Box<FilterAst>, Box<FilterAst>),
+    Or(Box<FilterAst>, Box<FilterAst>),
+}
+
+impl FilterAst {
+    fn matches(&self, cells: &[CellView]) -> bool {
+        match self {
+            FilterAst::Predicate(predicate) => predicate.matches(cells),
+            FilterAst::And(left, right) => left.matches(cells) && right.matches(cells),
+            FilterAst::Or(left, right) => left.matches(cells) || right.matches(cells),
+        }
+    }
+}
+
 fn compare_string_or_number(
     left: &str,
     right: &str,
@@ -239,23 +257,84 @@ fn compare_string_or_number(
     }
 }
 
-fn parse_filter(expr: &str, columns: &[ColumnInfo]) -> Result<FilterExpr> {
+/// Split `expr` on `or` / `and` (whitespace surrounded) without breaking
+/// quoted substrings such as `note contains "A and B"`.
+fn parse_filter(expr: &str, columns: &[ColumnInfo]) -> Result<FilterAst> {
     let expr = expr.trim();
     if expr.is_empty() {
         return Err(AppError::InvalidFilter("empty expression".to_string()));
     }
+    parse_or(expr, columns)
+}
 
+fn parse_or(expr: &str, columns: &[ColumnInfo]) -> Result<FilterAst> {
+    let parts = split_top_level(expr, " or ");
+    let mut ast = parse_and(parts[0].trim(), columns)?;
+    for part in &parts[1..] {
+        let right = parse_and(part.trim(), columns)?;
+        ast = FilterAst::Or(Box::new(ast), Box::new(right));
+    }
+    Ok(ast)
+}
+
+fn parse_and(expr: &str, columns: &[ColumnInfo]) -> Result<FilterAst> {
+    let parts = split_top_level(expr, " and ");
+    let mut ast = parse_predicate(parts[0].trim(), columns)?;
+    for part in &parts[1..] {
+        let right = parse_predicate(part.trim(), columns)?;
+        ast = FilterAst::And(Box::new(ast), Box::new(right));
+    }
+    Ok(ast)
+}
+
+fn parse_predicate(expr: &str, columns: &[ColumnInfo]) -> Result<FilterAst> {
     let (column, op, value) = split_filter(expr)?;
     let column_index = columns
         .iter()
         .position(|info| info.name == column)
         .ok_or_else(|| AppError::InvalidFilter(format!("unknown column '{column}'")))?;
-
-    Ok(FilterExpr {
+    Ok(FilterAst::Predicate(FilterExpr {
         column_index,
         op,
         value: unquote_filter_value(value.trim()),
-    })
+    }))
+}
+
+/// Split on `delimiter` (e.g. `" or "`) only at positions outside of single
+/// or double quotes.
+fn split_top_level(expr: &str, delimiter: &str) -> Vec<String> {
+    let chars: Vec<(usize, char)> = expr.char_indices().collect();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_quote: Option<char> = None;
+    let mut index = 0;
+    while index < chars.len() {
+        let (byte_index, ch) = chars[index];
+        match in_quote {
+            None => {
+                if ch == '\'' || ch == '"' {
+                    in_quote = Some(ch);
+                    index += 1;
+                    continue;
+                }
+                if expr[byte_index..].starts_with(delimiter) {
+                    parts.push(expr[start..byte_index].to_string());
+                    start = byte_index + delimiter.len();
+                    index += delimiter.chars().count();
+                    continue;
+                }
+                index += 1;
+            }
+            Some(quote) => {
+                if ch == quote {
+                    in_quote = None;
+                }
+                index += 1;
+            }
+        }
+    }
+    parts.push(expr[start..].to_string());
+    parts
 }
 
 fn split_filter(expr: &str) -> Result<(&str, FilterOp, &str)> {
@@ -693,6 +772,44 @@ mod tests {
         let expr = parse_filter("city = 上海", &cols).unwrap();
         assert!(expr.matches(&row(&["", "", "上海", ""]).cells));
         assert!(!expr.matches(&row(&["", "", "东京", ""]).cells));
+    }
+
+    #[test]
+    fn matches_and_combines_predicates() {
+        let cols = columns(&["row_id", "score", "city", "active"]);
+        let expr = parse_filter("score > 80 and active = true", &cols).unwrap();
+        assert!(expr.matches(&row(&["", "90", "", "true"]).cells));
+        assert!(!expr.matches(&row(&["", "90", "", "false"]).cells));
+        assert!(!expr.matches(&row(&["", "50", "", "true"]).cells));
+    }
+
+    #[test]
+    fn matches_or_combines_predicates() {
+        let cols = columns(&["row_id", "score", "city", "active"]);
+        let expr = parse_filter("city = 上海 or city = 東京", &cols).unwrap();
+        assert!(expr.matches(&row(&["", "", "上海", ""]).cells));
+        assert!(expr.matches(&row(&["", "", "東京", ""]).cells));
+        assert!(!expr.matches(&row(&["", "", "北京", ""]).cells));
+    }
+
+    #[test]
+    fn and_binds_tighter_than_or() {
+        let cols = columns(&["row_id", "score", "city", "active"]);
+        // (score > 90 or score < 10) and active = true
+        let expr = parse_filter("score > 90 or score < 10 and active = true", &cols).unwrap();
+        // high score alone should match (it is on the or side, unconstrained)
+        assert!(expr.matches(&row(&["", "95", "", "false"]).cells));
+        // low score requires active = true
+        assert!(expr.matches(&row(&["", "5", "", "true"]).cells));
+        assert!(!expr.matches(&row(&["", "5", "", "false"]).cells));
+    }
+
+    #[test]
+    fn quoted_operator_text_is_not_split() {
+        let cols = columns(&["row_id", "score", "city", "note"]);
+        let expr = parse_filter("note contains \"A and B\"", &cols).unwrap();
+        assert!(expr.matches(&row(&["", "", "", "x A and B y"]).cells));
+        assert!(!expr.matches(&row(&["", "", "", "other"]).cells));
     }
 
     #[test]
