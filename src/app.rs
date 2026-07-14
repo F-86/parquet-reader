@@ -17,6 +17,19 @@ pub enum ViewMode {
     Schema,
 }
 
+/// Status of the matched-row count shown in the status bar.
+///
+/// `Unknown` is the default for filtered reads (a full scan can be expensive).
+/// `Known` is used when the count is cheaply available: an unfiltered file's
+/// metadata row count, or a filtered result that fits within a single page.
+/// `Failed` preserves the error message instead of crashing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CountState {
+    Unknown,
+    Known(usize),
+    Failed(String),
+}
+
 #[derive(Debug)]
 pub enum SidebarOpenResult {
     None,
@@ -36,6 +49,9 @@ pub struct FileTab {
     pub scroll_x: usize,
     pub selected_schema_row: usize,
     pub filter: Option<String>,
+    pub sort_column: Option<usize>,
+    pub sort_ascending: bool,
+    pub count_state: CountState,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +83,9 @@ pub struct AppState {
     pub filter_completion_index: usize,
     pub filter_history: Vec<String>,
     pub filter_history_index: Option<usize>,
+    pub sort_column: Option<usize>,
+    pub sort_ascending: bool,
+    pub count_state: CountState,
     pub show_filter_popup: bool,
     pub table_visible_column_count: usize,
     pub sidebar_width: u16,
@@ -80,6 +99,17 @@ pub struct AppState {
     pub error: Option<String>,
     pub last_mouse_click: Option<MouseClickState>,
     pub should_quit: bool,
+}
+
+/// Escape a single CSV field: wrap in double quotes and double any embedded quote
+/// when the value contains a comma, quote, newline or carriage return.
+fn csv_field(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        let escaped = value.replace('"', "\"\"");
+        format!("\"{escaped}\"")
+    } else {
+        value.to_string()
+    }
 }
 
 impl AppState {
@@ -107,6 +137,9 @@ impl AppState {
             filter_completion_index: 0,
             filter_history: Vec::new(),
             filter_history_index: None,
+            sort_column: None,
+            sort_ascending: true,
+            count_state: CountState::Unknown,
             show_filter_popup: false,
             table_visible_column_count: 1,
             sidebar_width: 30,
@@ -155,10 +188,14 @@ impl AppState {
             scroll_x: 0,
             selected_schema_row: 0,
             filter: None,
+            sort_column: None,
+            sort_ascending: true,
+            count_state: CountState::Unknown,
         };
         self.tabs.push(tab);
         let index = self.tabs.len() - 1;
         self.restore_tab_state(index);
+        self.update_count_state();
         self.error = None;
         self.sidebar.focused = false;
         self.status = format!(
@@ -244,6 +281,7 @@ impl AppState {
         self.cell_detail_scroll = 0;
         self.show_filter_popup = false;
         self.error = None;
+        self.update_count_state();
         self.status = format!(
             "Loaded rows {}-{} of {} · page {} · columns {} · filter {}",
             self.row_start_display(),
@@ -254,6 +292,27 @@ impl AppState {
             self.filter_display()
         );
         self.save_active_tab_state();
+    }
+
+    /// Derive the matched-row count state from the just-loaded page.
+    ///
+    /// Unfiltered reads carry the metadata `num_rows` in `total_rows`, so the
+    /// count is `Known`. A filtered read that returned fewer than `page_size`
+    /// rows is the entire result, so its length is `Known`; otherwise it is
+    /// `Unknown` (the user can run an explicit count with `c`).
+    fn update_count_state(&mut self) {
+        if self.filter.is_none() {
+            self.count_state = match self.total_rows {
+                Some(total) => CountState::Known(total),
+                None => CountState::Unknown,
+            };
+            return;
+        }
+        if self.rows.len() < self.page_size {
+            self.count_state = CountState::Known(self.offset + self.rows.len());
+        } else {
+            self.count_state = CountState::Unknown;
+        }
     }
 
     pub fn page_display(&self) -> String {
@@ -285,8 +344,13 @@ impl AppState {
     }
 
     pub fn total_rows_display(&self) -> String {
-        self.total_rows
-            .map_or_else(|| "?".to_string(), |total| total.to_string())
+        match &self.count_state {
+            CountState::Known(total) => total.to_string(),
+            CountState::Failed(_) => "!".to_string(),
+            CountState::Unknown => self
+                .total_rows
+                .map_or_else(|| "?".to_string(), |total| total.to_string()),
+        }
     }
 
     fn save_active_tab_state(&mut self) {
@@ -305,6 +369,9 @@ impl AppState {
         tab.scroll_x = self.scroll_x;
         tab.filter = self.filter.clone();
         tab.selected_schema_row = self.selected_schema_row;
+        tab.sort_column = self.sort_column;
+        tab.sort_ascending = self.sort_ascending;
+        tab.count_state = self.count_state.clone();
     }
 
     fn restore_tab_state(&mut self, index: usize) {
@@ -325,6 +392,9 @@ impl AppState {
         self.selected_schema_row = tab
             .selected_schema_row
             .min(self.columns.len().saturating_sub(1));
+        self.sort_column = tab.sort_column;
+        self.sort_ascending = tab.sort_ascending;
+        self.count_state = tab.count_state.clone();
         self.schema_scroll = 0;
         self.show_cell_detail = false;
         self.cell_detail_scroll = 0;
@@ -426,6 +496,49 @@ impl AppState {
 
     pub fn select_schema_row_bottom(&mut self) {
         self.selected_schema_row = self.columns.len().saturating_sub(1);
+    }
+
+    pub fn sort_by_column(&mut self, column_index: usize) {
+        if column_index >= self.columns.len() {
+            return;
+        }
+        if self.sort_column == Some(column_index) {
+            self.sort_ascending = !self.sort_ascending;
+        } else {
+            self.sort_column = Some(column_index);
+            self.sort_ascending = true;
+        }
+        crate::data::sort_rows_by_column(&mut self.rows, column_index, self.sort_ascending);
+        self.selected_row = self.selected_row.min(self.rows.len().saturating_sub(1));
+        let column = self
+            .columns
+            .get(column_index)
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        self.status = format!(
+            "Sorted by {} ({})",
+            column,
+            if self.sort_ascending { "asc" } else { "desc" }
+        );
+    }
+
+    pub fn toggle_sort_direction(&mut self) {
+        let Some(column) = self.sort_column else {
+            self.status = "No sort column selected".to_string();
+            return;
+        };
+        self.sort_ascending = !self.sort_ascending;
+        crate::data::sort_rows_by_column(&mut self.rows, column, self.sort_ascending);
+        let name = self
+            .columns
+            .get(column)
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        self.status = format!(
+            "Sorted by {} ({})",
+            name,
+            if self.sort_ascending { "asc" } else { "desc" }
+        );
     }
 
     pub fn select_last_col(&mut self) {
@@ -543,6 +656,62 @@ impl AppState {
 
     /// Count rows matching the active filter by scanning the file. The result
     /// is shown in the status bar; failures are surfaced as actionable errors.
+    /// Write the current page (header + rows) to a CSV file under the system
+    /// temp directory and report the path in the status bar. Failures surface
+    /// as actionable errors. Only the currently loaded page is exported, since
+    /// data is read on demand, page by page.
+    pub fn export_current_page_csv(&mut self) {
+        if self.active_file.is_none() || self.rows.is_empty() {
+            self.status = "No rows to export".to_string();
+            return;
+        }
+        let stem = self
+            .active_file
+            .as_ref()
+            .and_then(|path| path.file_stem())
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("export");
+        let path = std::env::temp_dir().join(format!("{stem}.page.csv"));
+
+        let mut writer = match std::fs::File::create(&path) {
+            Ok(writer) => writer,
+            Err(error) => {
+                self.set_error(format!("failed to create export file: {error}"));
+                return;
+            }
+        };
+
+        use std::io::Write;
+        let mut header = String::from("#");
+        for column in &self.columns {
+            header.push(',');
+            header.push_str(&csv_field(&column.name));
+        }
+        if writeln!(writer, "{header}").is_err() {
+            self.set_error("failed to write export header".to_string());
+            return;
+        }
+
+        for (row_index, row) in self.rows.iter().enumerate() {
+            let mut line = (self.offset + row_index + 1).to_string();
+            for column in &self.columns {
+                line.push(',');
+                let value = row
+                    .cells
+                    .get(column.index)
+                    .map(|cell| cell.detail.as_str())
+                    .unwrap_or("");
+                line.push_str(&csv_field(value));
+            }
+            if writeln!(writer, "{line}").is_err() {
+                self.set_error("failed to write export row".to_string());
+                return;
+            }
+        }
+
+        self.status = format!("Exported page to {}", path.display());
+    }
+
     pub fn count_current_filter(&mut self) {
         let Some(path) = self.current_file_path() else {
             self.status = "No file opened".to_string();
@@ -551,10 +720,14 @@ impl AppState {
         let data_source = crate::data::ParquetFileDataSource::new(path);
         match data_source.count_with_filter(self.filter.as_deref()) {
             Ok(count) => {
+                self.count_state = CountState::Known(count);
                 let filter = self.filter_display();
                 self.status = format!("Count for filter '{filter}': {count} rows");
             }
-            Err(error) => self.set_error(error.to_string()),
+            Err(error) => {
+                self.count_state = CountState::Failed(error.to_string());
+                self.set_error(error.to_string());
+            }
         }
     }
 
@@ -926,6 +1099,35 @@ mod tests {
         assert_eq!(state.selected_schema_row, 0);
         state.select_schema_row_previous();
         assert_eq!(state.selected_schema_row, 0);
+    }
+
+    #[test]
+    fn export_current_page_csv_writes_header_and_rows() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("people.parquet"));
+        set_columns(&mut state, &["id", "name"]);
+        state.rows = vec![
+            RowView {
+                cells: vec![
+                    CellView::new("1".to_string()),
+                    CellView::new("a".to_string()),
+                ],
+            },
+            RowView {
+                cells: vec![
+                    CellView::new("2".to_string()),
+                    CellView::new("b,c".to_string()),
+                ],
+            },
+        ];
+        state.offset = 0;
+        state.export_current_page_csv();
+        let path = std::env::temp_dir().join("people.page.csv");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("#,id,name"));
+        assert!(content.contains("1,a"));
+        assert!(content.contains("2,\"b,c\""));
+        let _ = std::fs::remove_file(&path);
     }
 
     // P1.3: single candidate completion

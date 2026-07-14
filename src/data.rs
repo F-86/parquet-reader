@@ -455,6 +455,42 @@ fn unquote_filter_value(value: &str) -> String {
     }
     value.to_string()
 }
+/// Sort rows in place by a column using its formatted `detail` value.
+///
+/// Comparison prefers numeric ordering when both cells parse as numbers, so
+/// `10` sorts after `2`; otherwise it falls back to a locale-independent
+/// string comparison. `ascending` toggles direction.
+pub fn sort_rows_by_column(rows: &mut [RowView], column_index: usize, ascending: bool) {
+    rows.sort_by(|left, right| {
+        let left_value = left
+            .cells
+            .get(column_index)
+            .map(|cell| cell.detail.as_str())
+            .unwrap_or("");
+        let right_value = right
+            .cells
+            .get(column_index)
+            .map(|cell| cell.detail.as_str())
+            .unwrap_or("");
+
+        let ordering = compare_sort_keys(left_value, right_value);
+        if ascending {
+            ordering
+        } else {
+            ordering.reverse()
+        }
+    });
+}
+
+fn compare_sort_keys(left: &str, right: &str) -> std::cmp::Ordering {
+    match (left.parse::<f64>(), right.parse::<f64>()) {
+        (Ok(left), Ok(right)) => left
+            .partial_cmp(&right)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        _ => left.cmp(right),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,6 +685,28 @@ mod tests {
             }
         }
         assert_eq!(scanned, total);
+    }
+
+    #[test]
+    fn sort_rows_by_column_orders_numerically_and_toggle_direction() {
+        let mut rows = vec![
+            RowView {
+                cells: vec![CellView::new("3".to_string())],
+            },
+            RowView {
+                cells: vec![CellView::new("10".to_string())],
+            },
+            RowView {
+                cells: vec![CellView::new("2".to_string())],
+            },
+        ];
+        sort_rows_by_column(&mut rows, 0, true);
+        let order: Vec<&str> = rows.iter().map(|r| r.cells[0].detail.as_str()).collect();
+        assert_eq!(order, vec!["2", "3", "10"]);
+
+        sort_rows_by_column(&mut rows, 0, false);
+        let order: Vec<&str> = rows.iter().map(|r| r.cells[0].detail.as_str()).collect();
+        assert_eq!(order, vec!["10", "3", "2"]);
     }
 
     #[test]
