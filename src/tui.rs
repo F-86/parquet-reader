@@ -276,10 +276,13 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => app.cancel_filter_popup(),
             KeyCode::Enter => apply_filter(app),
-            KeyCode::Backspace => {
-                app.filter_input.pop();
-            }
-            KeyCode::Char(ch) => app.filter_input.push(ch),
+            KeyCode::Backspace => app.backspace_filter_char(),
+            KeyCode::Delete => app.delete_filter_char(),
+            KeyCode::Left => app.move_filter_cursor_left(),
+            KeyCode::Right => app.move_filter_cursor_right(),
+            KeyCode::Home => app.move_filter_cursor_home(),
+            KeyCode::End => app.move_filter_cursor_end(),
+            KeyCode::Char(ch) => app.insert_filter_char(ch),
             _ => {}
         }
         return;
@@ -769,6 +772,27 @@ fn draw_cell_detail(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     );
 }
 
+fn filter_input_before_cursor(app: &AppState) -> String {
+    let cursor = app.filter_cursor.min(app.filter_input.len());
+    app.filter_input[..cursor].to_string()
+}
+
+fn filter_cursor_char(app: &AppState) -> String {
+    let cursor = app.filter_cursor.min(app.filter_input.len());
+    app.filter_input[cursor..]
+        .chars()
+        .next()
+        .map(|ch| ch.to_string())
+        .unwrap_or_else(|| " ".to_string())
+}
+
+fn filter_input_after_cursor(app: &AppState) -> String {
+    let cursor = app.filter_cursor.min(app.filter_input.len());
+    let mut chars = app.filter_input[cursor..].chars();
+    let _ = chars.next();
+    chars.collect()
+}
+
 fn draw_filter_popup(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     let popup = centered_rect(72, 22, area);
     let lines = vec![
@@ -780,11 +804,16 @@ fn draw_filter_popup(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         Line::from(""),
         Line::from(vec![
             Span::styled("> ", Style::default().fg(Color::Yellow)),
-            Span::raw(app.filter_input.clone()),
+            Span::raw(filter_input_before_cursor(app)),
+            Span::styled(
+                filter_cursor_char(app),
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            ),
+            Span::raw(filter_input_after_cursor(app)),
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Enter: apply  ·  Esc: cancel  ·  r: reset filter outside popup",
+            "←/→ Home/End Delete/Backspace: edit  ·  Enter: apply  ·  Esc: cancel",
             Style::default().fg(Color::DarkGray),
         )),
     ];

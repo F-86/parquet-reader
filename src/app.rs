@@ -61,6 +61,7 @@ pub struct AppState {
     pub scroll_x: usize,
     pub filter: Option<String>,
     pub filter_input: String,
+    pub filter_cursor: usize,
     pub show_filter_popup: bool,
     pub table_visible_column_count: usize,
     pub sidebar_width: u16,
@@ -94,6 +95,7 @@ impl AppState {
             scroll_x: 0,
             filter: None,
             filter_input: String::new(),
+            filter_cursor: 0,
             show_filter_popup: false,
             table_visible_column_count: 1,
             sidebar_width: 30,
@@ -299,6 +301,7 @@ impl AppState {
         self.view = ViewMode::Data;
         self.columns = tab.columns;
         self.rows = tab.rows;
+        self.filter = tab.filter;
         self.offset = tab.offset;
         self.total_rows = tab.total_rows;
         self.selected_row = tab.selected_row.min(self.rows.len().saturating_sub(1));
@@ -426,12 +429,14 @@ impl AppState {
             return;
         }
         self.filter_input = self.filter.clone().unwrap_or_default();
+        self.filter_cursor = self.filter_input.len();
         self.show_filter_popup = true;
     }
 
     pub fn cancel_filter_popup(&mut self) {
         self.show_filter_popup = false;
         self.filter_input.clear();
+        self.filter_cursor = 0;
     }
 
     pub fn set_filter_from_input(&mut self) -> Option<String> {
@@ -445,6 +450,7 @@ impl AppState {
         self.selected_row = 0;
         self.show_filter_popup = false;
         self.filter_input.clear();
+        self.filter_cursor = 0;
         self.filter.clone()
     }
 
@@ -454,6 +460,72 @@ impl AppState {
         self.selected_row = 0;
         self.show_filter_popup = false;
         self.filter_input.clear();
+        self.filter_cursor = 0;
+    }
+
+    pub fn insert_filter_char(&mut self, ch: char) {
+        self.filter_cursor = self.filter_cursor.min(self.filter_input.len());
+        self.filter_input.insert(self.filter_cursor, ch);
+        self.filter_cursor += ch.len_utf8();
+    }
+
+    pub fn backspace_filter_char(&mut self) {
+        self.filter_cursor = self.filter_cursor.min(self.filter_input.len());
+        if self.filter_cursor == 0 {
+            return;
+        }
+        let previous = self.filter_input[..self.filter_cursor]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        self.filter_input.drain(previous..self.filter_cursor);
+        self.filter_cursor = previous;
+    }
+
+    pub fn delete_filter_char(&mut self) {
+        self.filter_cursor = self.filter_cursor.min(self.filter_input.len());
+        if self.filter_cursor >= self.filter_input.len() {
+            return;
+        }
+        let next = self.filter_input[self.filter_cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(index, _)| self.filter_cursor + index)
+            .unwrap_or(self.filter_input.len());
+        self.filter_input.drain(self.filter_cursor..next);
+    }
+
+    pub fn move_filter_cursor_left(&mut self) {
+        self.filter_cursor = self.filter_cursor.min(self.filter_input.len());
+        if self.filter_cursor == 0 {
+            return;
+        }
+        self.filter_cursor = self.filter_input[..self.filter_cursor]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+    }
+
+    pub fn move_filter_cursor_right(&mut self) {
+        self.filter_cursor = self.filter_cursor.min(self.filter_input.len());
+        if self.filter_cursor >= self.filter_input.len() {
+            return;
+        }
+        self.filter_cursor = self.filter_input[self.filter_cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(index, _)| self.filter_cursor + index)
+            .unwrap_or(self.filter_input.len());
+    }
+
+    pub fn move_filter_cursor_home(&mut self) {
+        self.filter_cursor = 0;
+    }
+
+    pub fn move_filter_cursor_end(&mut self) {
+        self.filter_cursor = self.filter_input.len();
     }
 
     pub fn filter_display(&self) -> String {
