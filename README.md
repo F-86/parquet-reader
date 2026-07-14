@@ -113,7 +113,7 @@ score > 80 and active = true
 
 ## 当前限制
 
-- 分页 offset 当前顺序跳过已读取行，超大 offset 后续优化（row group aware pagination）。
+- 分页基于 Parquet row group 跳转：直接定位包含目标 offset 的 row group，避免从头扫描丢弃已读行（仍顺序读取目标窗口内行）。
 - 筛选基于格式化后的 cell 文本，而非原始 Arrow 值。
 - 筛选后的总行数暂未知，状态栏显示 `?`（按 `c` 可手动 count）。
 - Schema 视图暂不支持滚动 / 排序。

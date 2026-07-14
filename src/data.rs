@@ -89,21 +89,65 @@ impl ParquetFileDataSource {
         let filter = filter
             .map(|expr| parse_filter(expr, &columns))
             .transpose()?;
-        let mut reader = builder.with_batch_size(limit.max(1)).build()?;
+
         let mut rows = Vec::new();
-        let mut skipped = 0usize;
-        while rows.len() < limit {
-            let Some(batch) = reader.next().transpose()? else {
-                break;
-            };
-            append_batch_rows(
-                &batch,
-                &mut rows,
-                offset,
-                &mut skipped,
-                limit,
-                filter.as_ref(),
-            );
+        if offset == 0 {
+            // Fast path: read from the start without row-group seeking.
+            let mut reader = builder.with_batch_size(limit.max(1)).build()?;
+            let mut skipped = 0usize;
+            while rows.len() < limit {
+                let Some(batch) = reader.next().transpose()? else {
+                    break;
+                };
+                append_batch_rows(&batch, &mut rows, 0, &mut skipped, limit, filter.as_ref());
+            }
+        } else {
+            // Row-group aware paging: skip whole row groups entirely before
+            // `offset`, then read only the groups that the [offset, offset+limit)
+            // window covers. Within the first covered group we skip the
+            // remaining in-group rows. This avoids streaming and discarding
+            // every row before the requested window.
+            let metadata = builder.metadata();
+            let row_group_rows = (0..metadata.num_row_groups())
+                .map(|index| metadata.row_group(index).num_rows() as usize)
+                .collect::<Vec<_>>();
+
+            let mut remaining = offset;
+            let mut start_group = 0;
+            while start_group < row_group_rows.len() && remaining >= row_group_rows[start_group] {
+                remaining -= row_group_rows[start_group];
+                start_group += 1;
+            }
+
+            if start_group < row_group_rows.len() {
+                // Expand the covered range until it can supply `limit` rows
+                // (or we run out of row groups).
+                let mut end_group = start_group;
+                let mut covered = row_group_rows[start_group] - remaining;
+                while covered < limit && end_group + 1 < row_group_rows.len() {
+                    end_group += 1;
+                    covered += row_group_rows[end_group];
+                }
+
+                let mut reader = builder
+                    .with_row_groups((start_group..end_group + 1).collect())
+                    .with_batch_size(limit.max(1))
+                    .build()?;
+                let mut skipped = 0usize;
+                while rows.len() < limit {
+                    let Some(batch) = reader.next().transpose()? else {
+                        break;
+                    };
+                    append_batch_rows(
+                        &batch,
+                        &mut rows,
+                        remaining,
+                        &mut skipped,
+                        limit,
+                        filter.as_ref(),
+                    );
+                }
+            }
         }
 
         Ok(DataPage {
@@ -546,6 +590,65 @@ mod tests {
         let expr = parse_filter("note contains \"A and B\"", &cols).unwrap();
         assert!(expr.matches(&row(&["", "", "", "x A and B y"]).cells));
         assert!(!expr.matches(&row(&["", "", "", "other"]).cells));
+    }
+
+    #[test]
+    fn row_group_aware_pagination_matches_sequential_read() {
+        use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+        use arrow_schema::{DataType, Field, Schema};
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc;
+
+        // Build a file with many small row groups so pagination must skip groups.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("row_id", DataType::Int64, false),
+            Field::new("group", DataType::Utf8, false),
+        ]));
+        let total = 200usize;
+        let row_ids = Int64Array::from_iter_values(1..=total as i64);
+        let groups = StringArray::from(
+            (1..=total)
+                .map(|row| format!("group-{:02}", (row - 1) / 10))
+                .collect::<Vec<_>>(),
+        );
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(row_ids) as ArrayRef, Arc::new(groups) as ArrayRef],
+        )
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rg.parquet");
+        let file = File::create(&path).unwrap();
+        let props = parquet::file::properties::WriterProperties::builder()
+            .set_max_row_group_size(10)
+            .build();
+        let options =
+            parquet::arrow::arrow_writer::ArrowWriterOptions::new().with_properties(props);
+        let mut writer = ArrowWriter::try_new_with_options(file, schema, options).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let source = ParquetFileDataSource::new(path);
+        let page_size = 25;
+        let mut scanned = 0usize;
+        while scanned < total {
+            let page = source.read_page(scanned, page_size).unwrap();
+            let expected: Vec<i64> =
+                ((scanned + 1) as i64..=(scanned + page.rows.len()) as i64).collect();
+            let got = page
+                .rows
+                .iter()
+                .map(|row| row.cells[0].display.parse::<i64>().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(got, expected, "offset {scanned} page mismatch");
+            assert_eq!(page.offset, scanned);
+            scanned += page.rows.len();
+            if page.rows.len() < page_size {
+                break;
+            }
+        }
+        assert_eq!(scanned, total);
     }
 
     #[test]
