@@ -272,6 +272,19 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
         return;
     }
 
+    if app.show_filter_popup {
+        match key.code {
+            KeyCode::Esc => app.cancel_filter_popup(),
+            KeyCode::Enter => apply_filter(app),
+            KeyCode::Backspace => {
+                app.filter_input.pop();
+            }
+            KeyCode::Char(ch) => app.filter_input.push(ch),
+            _ => {}
+        }
+        return;
+    }
+
     if app.sidebar.focused {
         match key.code {
             KeyCode::Esc => app.sidebar.focused = false,
@@ -298,6 +311,9 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
                 app.set_error(error.to_string());
             }
         }
+        KeyCode::Char('s') => app.toggle_schema_view(),
+        KeyCode::Char('/') => app.open_filter_popup(),
+        KeyCode::Char('r') => reset_filter(app),
         KeyCode::Up | KeyCode::Char('k') => app.select_row_previous(),
         KeyCode::Down | KeyCode::Char('j') => app.select_row_next(),
         KeyCode::Char('K') => app.select_row_top(),
@@ -353,6 +369,32 @@ fn display_cell_detail_value(value: &str) -> String {
     }
 }
 
+fn apply_filter(app: &mut AppState) {
+    let previous_filter = app.filter.clone();
+    let _ = app.set_filter_from_input();
+    let Some(path) = app.current_file_path() else {
+        app.status = "No file opened".to_string();
+        return;
+    };
+    let data_source = ParquetFileDataSource::new(path);
+    match data_source.read_page_with_filter(0, app.page_size, app.filter.as_deref()) {
+        Ok(page) => app.replace_active_page(page),
+        Err(error) => {
+            app.filter = previous_filter;
+            app.set_error(error.to_string());
+        }
+    }
+}
+
+fn reset_filter(app: &mut AppState) {
+    if app.filter.is_none() {
+        app.status = "No filter to reset".to_string();
+        return;
+    }
+    app.reset_filter();
+    load_page(app, 0);
+}
+
 fn load_file(app: &mut AppState, path: PathBuf) {
     if let Some(index) = app.tab_index_for_path(&path) {
         app.switch_to_tab(index);
@@ -392,7 +434,7 @@ fn load_page(app: &mut AppState, offset: usize) {
         return;
     };
     let data_source = ParquetFileDataSource::new(path);
-    match data_source.read_page(offset, app.page_size) {
+    match data_source.read_page_with_filter(offset, app.page_size, app.filter.as_deref()) {
         Ok(page) => app.replace_active_page(page),
         Err(error) => app.set_error(error.to_string()),
     }
@@ -422,6 +464,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
         draw_help(frame, root);
     } else if app.show_cell_detail {
         draw_cell_detail(frame, app, root);
+    } else if app.show_filter_popup {
+        draw_filter_popup(frame, app, root);
     }
 }
 
@@ -492,6 +536,7 @@ fn draw_right(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     match app.view {
         ViewMode::Empty => draw_empty(frame, app, chunks[1]),
         ViewMode::Data => draw_table(frame, app, chunks[1]),
+        ViewMode::Schema => draw_schema(frame, app, chunks[1]),
     }
     draw_status(frame, app, chunks[2]);
 }
@@ -548,6 +593,56 @@ fn draw_empty(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
     frame.render_widget(paragraph, area);
+}
+
+fn draw_schema(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
+    let header = Row::new([
+        Cell::from("#").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("name").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("logical type").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("physical type").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    let rows = app.columns.iter().map(|column| {
+        Row::new([
+            Cell::from(column.index.to_string()),
+            Cell::from(column.name.clone()),
+            Cell::from(column.logical_type.clone()),
+            Cell::from(
+                column
+                    .physical_type
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(6),
+            Constraint::Length(32),
+            Constraint::Min(24),
+            Constraint::Length(18),
+        ],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::ALL).title("Schema"));
+    frame.render_widget(table, area);
 }
 
 fn draw_table(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
@@ -674,6 +769,34 @@ fn draw_cell_detail(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     );
 }
 
+fn draw_filter_popup(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
+    let popup = centered_rect(72, 22, area);
+    let lines = vec![
+        Line::from("Filter expression (simple syntax):"),
+        Line::from(Span::styled(
+            "  column op value    op: = != > >= < <= contains",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Yellow)),
+            Span::raw(app.filter_input.clone()),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter: apply  ·  Esc: cancel  ·  r: reset filter outside popup",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().title("Filter").borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
 fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     let popup = centered_rect(66, 58, area);
     let lines = vec![
@@ -686,6 +809,9 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("  q / Ctrl-C        Quit"),
         Line::from("  h                 Toggle this help"),
         Line::from("  d                 Focus file sidebar"),
+        Line::from("  s                 Toggle Schema view"),
+        Line::from("  /                 Open filter popup"),
+        Line::from("  r                 Reset filter"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "File sidebar",

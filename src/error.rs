@@ -31,6 +31,9 @@ pub enum AppError {
     #[error("failed to read Arrow data: {0}")]
     ReadArrow(#[from] arrow_schema::ArrowError),
 
+    #[error("invalid filter: {0}")]
+    InvalidFilter(String),
+
     #[error("terminal error: {0}")]
     Terminal(#[from] io::Error),
 }

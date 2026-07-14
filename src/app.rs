@@ -14,6 +14,7 @@ use crate::{
 pub enum ViewMode {
     Empty,
     Data,
+    Schema,
 }
 
 #[derive(Debug)]
@@ -33,6 +34,7 @@ pub struct FileTab {
     pub selected_row: usize,
     pub selected_col: usize,
     pub scroll_x: usize,
+    pub filter: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +59,9 @@ pub struct AppState {
     pub selected_row: usize,
     pub selected_col: usize,
     pub scroll_x: usize,
+    pub filter: Option<String>,
+    pub filter_input: String,
+    pub show_filter_popup: bool,
     pub table_visible_column_count: usize,
     pub sidebar_width: u16,
     pub resizing_sidebar: bool,
@@ -87,6 +92,9 @@ impl AppState {
             selected_row: 0,
             selected_col: 0,
             scroll_x: 0,
+            filter: None,
+            filter_input: String::new(),
+            show_filter_popup: false,
             table_visible_column_count: 1,
             sidebar_width: 30,
             resizing_sidebar: false,
@@ -119,6 +127,7 @@ impl AppState {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
+        self.filter = None;
         let tab = FileTab {
             file_path: path,
             title,
@@ -129,6 +138,7 @@ impl AppState {
             selected_row: 0,
             selected_col: 0,
             scroll_x: 0,
+            filter: None,
         };
         self.tabs.push(tab);
         let index = self.tabs.len() - 1;
@@ -136,11 +146,12 @@ impl AppState {
         self.error = None;
         self.sidebar.focused = false;
         self.status = format!(
-            "Loaded rows {}-{} of {} · columns {}",
+            "Loaded rows {}-{} of {} · columns {} · filter {}",
             self.row_start_display(),
             self.row_end_display(),
             self.total_rows_display(),
-            self.columns.len()
+            self.columns.len(),
+            self.filter_display()
         );
     }
 
@@ -215,14 +226,16 @@ impl AppState {
         self.scroll_x = self.scroll_x.min(self.columns.len().saturating_sub(1));
         self.show_cell_detail = false;
         self.cell_detail_scroll = 0;
+        self.show_filter_popup = false;
         self.error = None;
         self.status = format!(
-            "Loaded rows {}-{} of {} · page {} · columns {}",
+            "Loaded rows {}-{} of {} · page {} · columns {} · filter {}",
             self.row_start_display(),
             self.row_end_display(),
             self.total_rows_display(),
             self.page_display(),
-            self.columns.len()
+            self.columns.len(),
+            self.filter_display()
         );
         self.save_active_tab_state();
     }
@@ -274,6 +287,7 @@ impl AppState {
         tab.selected_row = self.selected_row;
         tab.selected_col = self.selected_col;
         tab.scroll_x = self.scroll_x;
+        tab.filter = self.filter.clone();
     }
 
     fn restore_tab_state(&mut self, index: usize) {
@@ -390,6 +404,62 @@ impl AppState {
         }
     }
 
+    pub fn toggle_schema_view(&mut self) {
+        if self.active_file.is_none() {
+            self.status = "No file opened".to_string();
+            return;
+        }
+        self.view = match self.view {
+            ViewMode::Schema => ViewMode::Data,
+            _ => ViewMode::Schema,
+        };
+        self.status = match self.view {
+            ViewMode::Schema => "Schema view".to_string(),
+            ViewMode::Data => "Data view".to_string(),
+            ViewMode::Empty => self.status.clone(),
+        };
+    }
+
+    pub fn open_filter_popup(&mut self) {
+        if self.active_file.is_none() {
+            self.status = "No file opened".to_string();
+            return;
+        }
+        self.filter_input = self.filter.clone().unwrap_or_default();
+        self.show_filter_popup = true;
+    }
+
+    pub fn cancel_filter_popup(&mut self) {
+        self.show_filter_popup = false;
+        self.filter_input.clear();
+    }
+
+    pub fn set_filter_from_input(&mut self) -> Option<String> {
+        let filter = self.filter_input.trim().to_string();
+        self.filter = if filter.is_empty() {
+            None
+        } else {
+            Some(filter.clone())
+        };
+        self.offset = 0;
+        self.selected_row = 0;
+        self.show_filter_popup = false;
+        self.filter_input.clear();
+        self.filter.clone()
+    }
+
+    pub fn reset_filter(&mut self) {
+        self.filter = None;
+        self.offset = 0;
+        self.selected_row = 0;
+        self.show_filter_popup = false;
+        self.filter_input.clear();
+    }
+
+    pub fn filter_display(&self) -> String {
+        self.filter.clone().unwrap_or_else(|| "-".to_string())
+    }
+
     pub fn selected_cell_value(&self) -> Option<&str> {
         self.rows
             .get(self.selected_row)
@@ -404,13 +474,14 @@ impl AppState {
             format!("{} | root: {}", self.status, self.root_dir.display())
         } else {
             format!(
-                "{} | rows {}-{} of {} | page {} | cols {} | selected r{} c{}",
+                "{} | rows {}-{} of {} | page {} | cols {} | filter {} | selected r{} c{}",
                 self.status,
                 self.row_start_display(),
                 self.row_end_display(),
                 self.total_rows_display(),
                 self.page_display(),
                 self.columns.len(),
+                self.filter_display(),
                 self.selected_row_display(),
                 self.selected_col_display(),
             )

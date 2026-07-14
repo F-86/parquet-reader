@@ -69,6 +69,15 @@ impl ParquetFileDataSource {
     }
 
     pub fn read_page(&self, offset: usize, limit: usize) -> Result<DataPage> {
+        self.read_page_with_filter(offset, limit, None)
+    }
+
+    pub fn read_page_with_filter(
+        &self,
+        offset: usize,
+        limit: usize,
+        filter: Option<&str>,
+    ) -> Result<DataPage> {
         let file = File::open(&self.path).map_err(|source| AppError::FileMetadata {
             path: self.path.clone(),
             source,
@@ -79,7 +88,11 @@ impl ParquetFileDataSource {
                 source,
             }
         })?;
-        let total_rows = Some(builder.metadata().file_metadata().num_rows().max(0) as usize);
+        let total_rows = if filter.is_some() {
+            None
+        } else {
+            Some(builder.metadata().file_metadata().num_rows().max(0) as usize)
+        };
         let schema = builder.schema();
         let columns = schema
             .fields()
@@ -93,6 +106,9 @@ impl ParquetFileDataSource {
             })
             .collect::<Vec<_>>();
 
+        let filter = filter
+            .map(|expr| parse_filter(expr, &columns))
+            .transpose()?;
         let mut reader = builder.with_batch_size(limit.max(1)).build()?;
         let mut rows = Vec::new();
         let mut skipped = 0usize;
@@ -100,7 +116,14 @@ impl ParquetFileDataSource {
             let Some(batch) = reader.next().transpose()? else {
                 break;
             };
-            append_batch_rows(&batch, &mut rows, offset, &mut skipped, limit);
+            append_batch_rows(
+                &batch,
+                &mut rows,
+                offset,
+                &mut skipped,
+                limit,
+                filter.as_ref(),
+            );
         }
 
         Ok(DataPage {
@@ -135,6 +158,7 @@ fn append_batch_rows(
     offset: usize,
     skipped: &mut usize,
     limit: usize,
+    filter: Option<&FilterExpr>,
 ) {
     for row_index in 0..batch.num_rows() {
         if rows.len() >= limit {
@@ -148,9 +172,131 @@ fn append_batch_rows(
             .columns()
             .iter()
             .map(|array| format_cell(Arc::clone(array), row_index))
-            .collect();
+            .collect::<Vec<_>>();
+        if filter.is_some_and(|filter| !filter.matches(&cells)) {
+            continue;
+        }
         rows.push(RowView { cells });
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FilterOp {
+    Eq,
+    NotEq,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    Contains,
+}
+
+#[derive(Debug, Clone)]
+struct FilterExpr {
+    column_index: usize,
+    op: FilterOp,
+    value: String,
+}
+
+impl FilterExpr {
+    fn matches(&self, cells: &[CellView]) -> bool {
+        let Some(cell) = cells.get(self.column_index) else {
+            return false;
+        };
+        let left = cell.detail.as_str();
+        match self.op {
+            FilterOp::Eq => {
+                compare_string_or_number(left, &self.value, |ord| ord == std::cmp::Ordering::Equal)
+            }
+            FilterOp::NotEq => {
+                !compare_string_or_number(left, &self.value, |ord| ord == std::cmp::Ordering::Equal)
+            }
+            FilterOp::Gt => compare_string_or_number(left, &self.value, |ord| {
+                ord == std::cmp::Ordering::Greater
+            }),
+            FilterOp::Gte => compare_string_or_number(left, &self.value, |ord| {
+                matches!(ord, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+            }),
+            FilterOp::Lt => {
+                compare_string_or_number(left, &self.value, |ord| ord == std::cmp::Ordering::Less)
+            }
+            FilterOp::Lte => compare_string_or_number(left, &self.value, |ord| {
+                matches!(ord, std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            }),
+            FilterOp::Contains => left.to_lowercase().contains(&self.value.to_lowercase()),
+        }
+    }
+}
+
+fn compare_string_or_number(
+    left: &str,
+    right: &str,
+    predicate: impl FnOnce(std::cmp::Ordering) -> bool,
+) -> bool {
+    match (left.parse::<f64>(), right.parse::<f64>()) {
+        (Ok(left), Ok(right)) => left.partial_cmp(&right).is_some_and(predicate),
+        _ => predicate(left.cmp(right)),
+    }
+}
+
+fn parse_filter(expr: &str, columns: &[ColumnInfo]) -> Result<FilterExpr> {
+    let expr = expr.trim();
+    if expr.is_empty() {
+        return Err(AppError::InvalidFilter("empty expression".to_string()));
+    }
+
+    let (column, op, value) = split_filter(expr)?;
+    let column_index = columns
+        .iter()
+        .position(|info| info.name == column)
+        .ok_or_else(|| AppError::InvalidFilter(format!("unknown column '{column}'")))?;
+
+    Ok(FilterExpr {
+        column_index,
+        op,
+        value: unquote_filter_value(value.trim()),
+    })
+}
+
+fn split_filter(expr: &str) -> Result<(&str, FilterOp, &str)> {
+    for op_text in [" contains ", " >= ", " <= ", " != ", " = ", " > ", " < "] {
+        if let Some(index) = expr.find(op_text) {
+            let column = expr[..index].trim();
+            let value = expr[index + op_text.len()..].trim();
+            if column.is_empty() || value.is_empty() {
+                return Err(AppError::InvalidFilter(
+                    "expected: column op value".to_string(),
+                ));
+            }
+            let op = match op_text.trim() {
+                "=" => FilterOp::Eq,
+                "!=" => FilterOp::NotEq,
+                ">" => FilterOp::Gt,
+                ">=" => FilterOp::Gte,
+                "<" => FilterOp::Lt,
+                "<=" => FilterOp::Lte,
+                "contains" => FilterOp::Contains,
+                _ => unreachable!(),
+            };
+            return Ok((column, op, value));
+        }
+    }
+    Err(AppError::InvalidFilter(
+        "expected: column op value; operators: = != > >= < <= contains".to_string(),
+    ))
+}
+
+fn unquote_filter_value(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+        {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+    value.to_string()
 }
 
 fn format_cell(array: ArrayRef, row_index: usize) -> CellView {
