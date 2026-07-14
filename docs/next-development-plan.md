@@ -1,6 +1,6 @@
 # parquet-reader 剩余开发计划
 
-> 最后更新：2026-07-14（R3 完成）
+> 最后更新：2026-07-14（R2.1 完成）
 > 说明：本文件现在只保留**截至当前仍未完成**的事项；原先已经完成的 P1-P5 内容已不再重复展开。
 
 本文档面向继续接手实现的 AI coding agent，用来回答两件事：
@@ -58,6 +58,15 @@
   - TUI 层 `handle_key` 简化为 `key_to_action → handle_action → execute_data_command`
   - OSC 52 剪贴板逻辑集中到 `execute_data_command`
   - 25 个 `action` 模块测试覆盖所有输入模式的按键映射
+- R2.1：类型化比较
+  - 新增 `TypedValue` 枚举和 `extract_typed_value` 函数（`src/formatting.rs`）
+  - 覆盖 Boolean、整数/浮点、Date/Time/Timestamp/Duration、Decimal128/256、Utf8、Dictionary
+  - Filter 匹配从"格式化文本"改为"原始类型值"比较
+  - `FilterExpr::matches_typed` 按类型路由：数字按数字比较、布尔按布尔比较、字符串保留 numeric-then-lexical fallback
+  - `contains` 保持字符串语义（将 typed value 转为文本后做大小写不敏感包含）
+  - Null 值不匹配任何比较操作符
+  - `append_batch_rows` 和 `count_with_filter` 统一使用 typed 路径
+  - 新增 5 个 typed comparison 测试
 
 当前实现仍遵守以下长期约束：
 
@@ -110,14 +119,9 @@
 
 ### 建议拆分
 
-#### R2.1 类型化比较
+#### R2.1 类型化比较 ✅
 
-- 把 filter predicate 的比较尽量下沉到结构化值层；
-- 保持 UI 语义不变；
-- 先覆盖：
-  - 数字
-  - 布尔
-  - 日期 / 时间 / 时间戳
+已完成：把 filter predicate 的比较下沉到结构化值层。覆盖数字、布尔、日期/时间/时间戳/Duration、Decimal。UI 语义不变。
 
 #### R2.2 列级最小化匹配
 
@@ -192,19 +196,20 @@ Evaluate DataFusion as an optional filter backend
 建议按以下顺序继续：
 
 ```text
-R1 ✅ > R3 ✅ > R2
+R1 ✅ > R3 ✅ > R2.1 ✅ > R2.2
 ```
 
 原因：
 
 - **R1** 已完成：Cell Detail 内搜索已落地；
 - **R3** 已完成：状态机与 TUI 解耦已落地；
+- **R2.1** 已完成：类型化比较已落地；
 - **R2** 风险最高，适合在行为和分层更稳定后推进。
 
 如果要继续推进，优先选：
 
 ```text
-R2：筛选下推 / 筛选执行模型升级
+R2.2：列级最小化匹配
 ```
 
 ---
