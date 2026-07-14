@@ -678,10 +678,15 @@ fn draw_schema(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 }
 
 fn draw_table(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
-    const DEFAULT_COLUMN_WIDTH: u16 = 24;
+    const MIN_COLUMN_WIDTH: u16 = 12;
+    const MAX_COLUMN_WIDTH: u16 = 40;
+    const ROW_NUMBER_WIDTH: u16 = 6;
 
     let inner_width = area.width.saturating_sub(2).max(1);
-    let visible_column_count = (inner_width / DEFAULT_COLUMN_WIDTH).max(1) as usize;
+    let available = inner_width.saturating_sub(ROW_NUMBER_WIDTH).max(1);
+    // Show as many columns as fit between the min and max widths.
+    let visible_column_count = ((available / MIN_COLUMN_WIDTH).max(1) as usize)
+        .min((available / MAX_COLUMN_WIDTH).max(1) as usize);
     app.table_visible_column_count = visible_column_count;
     let visible_columns = app
         .columns
@@ -694,33 +699,69 @@ fn draw_table(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
         return;
     }
 
-    let column_width = if visible_columns.len() == 1 {
-        inner_width
+    // Estimate a width per column from the longest header / cell value currently
+    // visible, clamped to [MIN, MAX]. A single visible column takes all space.
+    let column_widths = if visible_columns.len() == 1 {
+        vec![available]
     } else {
-        DEFAULT_COLUMN_WIDTH
+        visible_columns
+            .iter()
+            .map(|column| {
+                let mut width = unicode_width::UnicodeWidthStr::width(column.name.as_str()).max(
+                    unicode_width::UnicodeWidthStr::width(column.logical_type.as_str()),
+                ) + 1;
+                for row in &app.rows {
+                    if let Some(cell) = row.cells.get(column.index) {
+                        width =
+                            width.max(unicode_width::UnicodeWidthStr::width(cell.display.as_str()));
+                    }
+                }
+                width = width
+                    .min(MAX_COLUMN_WIDTH as usize)
+                    .max(MIN_COLUMN_WIDTH as usize);
+                width as u16
+            })
+            .collect::<Vec<_>>()
     };
-    let cell_display_width = column_width.saturating_sub(1) as usize;
+    let cell_display_widths = column_widths
+        .iter()
+        .map(|width| (*width).saturating_sub(1) as usize)
+        .collect::<Vec<_>>();
 
-    let header = Row::new(visible_columns.iter().map(|column| {
+    let header_cells = visible_columns.iter().enumerate().map(|(i, column)| {
         let mut label = format!("{}:{}", column.name, column.logical_type);
         if let Some(physical_type) = &column.physical_type {
             label.push_str(&format!("/{physical_type}"));
         }
-        Cell::from(truncate_to_width(&label, cell_display_width)).style(
+        Cell::from(truncate_to_width(&label, cell_display_widths[i])).style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
-    }));
+    });
+    let header = Row::new(
+        std::iter::once(Cell::from(Span::styled(
+            "#",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .chain(header_cells),
+    );
 
     let rows = app.rows.iter().enumerate().map(|(row_index, row)| {
-        Row::new(visible_columns.iter().map(|column| {
+        let row_number = (app.offset + row_index + 1).to_string();
+        let number_cell = Cell::from(Span::raw(truncate_to_width(
+            &row_number,
+            ROW_NUMBER_WIDTH as usize - 1,
+        )));
+        let body_cells = visible_columns.iter().enumerate().map(|(i, column)| {
             let value = row
                 .cells
                 .get(column.index)
                 .map(|cell| cell.display.as_str())
                 .unwrap_or_default();
-            let cell = Cell::from(truncate_to_width(value, cell_display_width));
+            let cell = Cell::from(truncate_to_width(value, cell_display_widths[i]));
             if row_index == app.selected_row && column.index == app.selected_col {
                 cell.style(
                     Style::default()
@@ -731,13 +772,12 @@ fn draw_table(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
             } else {
                 cell
             }
-        }))
+        });
+        Row::new(std::iter::once(number_cell).chain(body_cells))
     });
 
-    let widths = visible_columns
-        .iter()
-        .map(|_| Constraint::Length(column_width))
-        .collect::<Vec<_>>();
+    let mut widths = vec![Constraint::Length(ROW_NUMBER_WIDTH)];
+    widths.extend(column_widths.iter().map(|width| Constraint::Length(*width)));
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::ALL).title("Data"))
@@ -820,12 +860,17 @@ fn draw_cell_detail(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         Style::default().fg(Color::DarkGray),
     )));
 
+    // Clamp scroll so the popup never scrolls past its content.
+    let inner_height = popup.height.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(inner_height);
+    let scroll = app.cell_detail_scroll.min(max_scroll as u16);
+
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().title(title).borders(Borders::ALL))
             .wrap(Wrap { trim: false })
-            .scroll((app.cell_detail_scroll, 0)),
+            .scroll((scroll, 0)),
         popup,
     );
 }

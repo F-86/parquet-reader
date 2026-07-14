@@ -1108,6 +1108,7 @@ name = "parquet-reader"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
+ "arrow-buffer",
  "arrow-schema",
  "base64",
  "clap",
