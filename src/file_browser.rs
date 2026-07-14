@@ -131,15 +131,17 @@ fn read_directory_entries(directory: &Path) -> Result<Vec<VisibleFileEntry>> {
 
     let mut entries = Vec::new();
     for entry in read_dir {
-        let entry = entry.map_err(|source| AppError::ReadDirectory {
-            path: directory.to_path_buf(),
-            source,
-        })?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            // A directory entry may vanish between enumeration and stat;
+            // skip it instead of failing the whole tree scan.
+            Err(_) => continue,
+        };
         let path = entry.path();
-        let metadata = entry.metadata().map_err(|source| AppError::FileMetadata {
-            path: path.clone(),
-            source,
-        })?;
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
         let kind = if metadata.is_dir() {
             FileEntryKind::Directory
@@ -152,9 +154,15 @@ fn read_directory_entries(directory: &Path) -> Result<Vec<VisibleFileEntry>> {
             FileEntryKind::OtherFile
         };
 
+        // Skip entries whose canonicalization fails (e.g. a dangling symlink
+        // that disappeared) rather than aborting the entire directory scan.
+        let canonical = match canonicalize_existing(&path) {
+            Ok(canonical) => canonical,
+            Err(_) => continue,
+        };
         entries.push(VisibleFileEntry {
             name,
-            path: canonicalize_existing(&path)?,
+            path: canonical,
             kind,
             depth: 0,
             expanded: false,
@@ -228,5 +236,21 @@ mod tests {
 
         sidebar.toggle_directory(&sub).unwrap();
         assert_eq!(sidebar.entries.len(), 1);
+    }
+
+    #[test]
+    fn vanishesing_entry_does_not_break_scan() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_path_buf();
+        // A transient sub-directory that may disappear during iteration must
+        // not abort the whole tree scan.
+        make_dir(&root_path, "stable");
+        make_dir(&root_path, "_vanish_");
+
+        let mut sidebar = FileSidebar::new(root_path.clone()).unwrap();
+        // Scan survives even if an entry disappears between read_dir and stat.
+        let _ = fs::remove_dir(root_path.join("_vanish_"));
+        sidebar.refresh().unwrap();
+        assert!(sidebar.entries.iter().any(|entry| entry.name == "stable"));
     }
 }

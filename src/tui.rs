@@ -308,6 +308,8 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
             KeyCode::End => app.move_filter_cursor_end(),
             KeyCode::Tab => app.complete_filter_field(false),
             KeyCode::BackTab => app.complete_filter_field(true),
+            KeyCode::Up => app.previous_filter_history(),
+            KeyCode::Down => app.next_filter_history(),
             KeyCode::Char(ch) => app.insert_filter_char(ch),
             _ => {}
         }
@@ -850,10 +852,10 @@ fn filter_input_after_cursor(app: &AppState) -> String {
 
 fn draw_filter_popup(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     let popup = centered_rect(72, 22, area);
-    let lines = vec![
+    let mut lines = vec![
         Line::from("Filter expression (simple syntax):"),
         Line::from(Span::styled(
-            "  column op value    op: = != > >= < <= contains",
+            "  column op value    op: = != > >= < <= contains    and / or combine",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
@@ -868,10 +870,38 @@ fn draw_filter_popup(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Tab: complete column  ·  ←/→ Home/End Delete/Backspace: edit  ·  Enter: apply",
+            "Tab: complete column  ·  ↑/↓ history  ·  ←/→ Home/End Del/Bksp: edit  ·  Enter: apply",
             Style::default().fg(Color::DarkGray),
         )),
     ];
+
+    if !app.filter_completion_candidates.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "columns:",
+            Style::default().fg(Color::Cyan),
+        )));
+        for (index, candidate) in app.filter_completion_candidates.iter().enumerate() {
+            let style = if index == app.filter_completion_index {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let marker = if index == app.filter_completion_index {
+                "> "
+            } else {
+                "  "
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{marker}{candidate}"),
+                style,
+            )));
+        }
+    }
+
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines)

@@ -64,6 +64,8 @@ pub struct AppState {
     pub filter_cursor: usize,
     pub filter_completion_candidates: Vec<String>,
     pub filter_completion_index: usize,
+    pub filter_history: Vec<String>,
+    pub filter_history_index: Option<usize>,
     pub show_filter_popup: bool,
     pub table_visible_column_count: usize,
     pub sidebar_width: u16,
@@ -100,6 +102,8 @@ impl AppState {
             filter_cursor: 0,
             filter_completion_candidates: Vec::new(),
             filter_completion_index: 0,
+            filter_history: Vec::new(),
+            filter_history_index: None,
             show_filter_popup: false,
             table_visible_column_count: 1,
             sidebar_width: 30,
@@ -436,6 +440,7 @@ impl AppState {
         self.filter_cursor = self.filter_input.len();
         self.filter_completion_candidates.clear();
         self.filter_completion_index = 0;
+        self.filter_history_index = None;
         self.show_filter_popup = true;
     }
 
@@ -445,6 +450,7 @@ impl AppState {
         self.filter_cursor = 0;
         self.filter_completion_candidates.clear();
         self.filter_completion_index = 0;
+        self.filter_history_index = None;
     }
 
     pub fn set_filter_from_input(&mut self) -> Option<String> {
@@ -452,6 +458,7 @@ impl AppState {
         self.filter = if filter.is_empty() {
             None
         } else {
+            self.add_filter_to_history(filter.clone());
             Some(filter.clone())
         };
         self.offset = 0;
@@ -461,7 +468,48 @@ impl AppState {
         self.filter_cursor = 0;
         self.filter_completion_candidates.clear();
         self.filter_completion_index = 0;
+        self.filter_history_index = None;
         self.filter.clone()
+    }
+
+    pub fn add_filter_to_history(&mut self, filter: String) {
+        if filter.is_empty() {
+            return;
+        }
+        if self.filter_history.iter().any(|entry| *entry == filter) {
+            return;
+        }
+        self.filter_history.push(filter);
+    }
+
+    pub fn previous_filter_history(&mut self) {
+        if self.filter_history.is_empty() {
+            return;
+        }
+        let next = match self.filter_history_index {
+            None => self.filter_history.len() - 1,
+            Some(index) if index == 0 => 0,
+            Some(index) => index - 1,
+        };
+        self.filter_history_index = Some(next);
+        self.filter_input = self.filter_history[next].clone();
+        self.filter_cursor = self.filter_input.len();
+    }
+
+    pub fn next_filter_history(&mut self) {
+        let Some(index) = self.filter_history_index else {
+            return;
+        };
+        if index + 1 >= self.filter_history.len() {
+            self.filter_history_index = None;
+            self.filter_input.clear();
+            self.filter_cursor = 0;
+            return;
+        }
+        let next = index + 1;
+        self.filter_history_index = Some(next);
+        self.filter_input = self.filter_history[next].clone();
+        self.filter_cursor = self.filter_input.len();
     }
 
     pub fn reset_filter(&mut self) {
@@ -473,6 +521,7 @@ impl AppState {
         self.filter_cursor = 0;
         self.filter_completion_candidates.clear();
         self.filter_completion_index = 0;
+        self.filter_history_index = None;
     }
 
     pub fn insert_filter_char(&mut self, ch: char) {
@@ -814,6 +863,44 @@ mod tests {
         state.complete_filter_field(false);
         assert_eq!(state.filter_input, "zzz");
         assert!(state.status.contains("zzz"));
+    }
+
+    // P3.3: applied filters are recorded in history without duplicates
+    #[test]
+    fn applied_filters_enter_history() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        state.filter_input = "score > 80".to_string();
+        state.set_filter_from_input();
+        state.filter_input = "city = 上海".to_string();
+        state.set_filter_from_input();
+        state.filter_input = "score > 80".to_string();
+        state.set_filter_from_input();
+        assert_eq!(state.filter_history, vec!["score > 80", "city = 上海"]);
+    }
+
+    // P3.3: up/down navigate history and clear it at the end
+    #[test]
+    fn history_navigation_cycles_through_entries() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        state.filter_input = "a = 1".to_string();
+        state.set_filter_from_input();
+        state.filter_input = "b = 2".to_string();
+        state.set_filter_from_input();
+
+        state.previous_filter_history();
+        assert_eq!(state.filter_input, "b = 2");
+        state.previous_filter_history();
+        assert_eq!(state.filter_input, "a = 1");
+        state.previous_filter_history();
+        assert_eq!(state.filter_input, "a = 1");
+
+        state.next_filter_history();
+        assert_eq!(state.filter_input, "b = 2");
+        state.next_filter_history();
+        assert_eq!(state.filter_input, "");
+        assert_eq!(state.filter_history_index, None);
     }
 
     // P1.4: filter conditions are isolated per tab
