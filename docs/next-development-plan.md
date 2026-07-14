@@ -1,1250 +1,188 @@
-# parquet-reader 后续开发计划
+# parquet-reader 剩余开发计划
 
-本文档面向接手实现的 AI coding 模型，记录当前项目状态、后续阶段设计、建议实现顺序和验收命令。
+> 最后更新：2026-07-14
+> 说明：本文件现在只保留**截至当前仍未完成**的事项；原先已经完成的 P1-P5 内容已不再重复展开。
+
+本文档面向继续接手实现的 AI coding agent，用来回答两件事：
+
+1. 这个项目现在还剩什么没做；
+2. 接下来应按什么顺序继续推进。
+
+---
 
 ## 当前状态
 
-项目已经完成到 M3 的可用版本。
+原计划中以下内容已经落地，不再作为待办：
 
-已完成能力：
+- P1：测试补齐
+  - AppState 状态测试
+  - filter 输入编辑测试
+  - tab 间 filter 隔离测试
+  - 分页边界测试
+  - Schema/Data 切换测试
+  - filter parser / matcher 测试
+  - 文件树 root 边界测试
+- P2：文档同步
+  - `README.md`
+  - `docs/usage.md`
+  - `docs/design/09-milestones-and-decisions.md`
+- P3：筛选增强
+  - `and` / `or`
+  - 筛选补全候选列表
+  - 筛选历史
+  - 手动 count（`c`）
+  - `CountState`
+- P4：健壮性与值显示体验
+  - Formatting 层拆分到 `src/formatting.rs`
+  - 更多 Arrow 类型支持
+  - Cell Detail JSON 高亮
+  - 复制整行（`Y`）
+  - detail scroll clamp
+  - 动态列宽
+  - 行号列
+  - Schema 视图滚动与独立导航
+- P5 已完成部分
+  - Row-group-aware pagination
+  - 当前页排序（`o` / `O`）
+  - 当前页导出（`e`）
 
-- M1：最小可启动 TUI viewer
-  - TUI 启动和终端恢复
-  - 左侧文件树
-  - 鼠标支持
-  - 可拖动侧边栏
-  - 多 tab
-  - Parquet 首屏读取
-  - Cell Detail
-  - 复杂类型 pretty print
-  - 测试数据生成 bin
-  - Cargo 默认运行主程序
-- M2：导航与分页
-  - 行导航
-  - 列导航
-  - 水平滚动
-  - 上一页 / 下一页
-  - 分页状态栏
-  - 分页测试数据生成器
-  - 鼠标滚轮上下翻行 / 翻页
-- M3：Schema 与基础筛选
-  - Schema 视图
-  - 筛选弹窗
-  - 筛选输入光标编辑
-  - 字段 Tab 补全
-  - 筛选重置
-  - 筛选错误恢复
-  - 每个 tab 独立筛选条件
-  - 状态栏 filter 高亮
-  - 筛选后的分页 offset 语义修复
+当前实现仍遵守以下长期约束：
 
-当前建议后续阶段：
-
-```text
-P1：补测试，锁定现有行为
-P2：文档同步
-P3：M3 筛选增强
-P4：M4 健壮性和值显示体验
-P5：性能优化与架构清理
-```
-
-推荐优先级：
-
-```text
-P1 > P2 > P3 > P4 > P5
-```
-
-原因：当前功能增长较快，但测试较少。后续继续加筛选、复杂类型、分页优化时，容易破坏已有行为。先补测试可以降低回归风险。
+- 默认按需分页读取，不做隐式全量加载；
+- 排序与导出都只针对**当前页**；
+- TUI / AppState / Data Access / Formatting 边界保持分离；
+- 错误走状态栏短消息，不因空结果或失败路径崩溃。
 
 ---
 
-## P1：补测试，锁定现有行为
+## 仍未完成的事项
+
+## R1：Cell Detail 内搜索
 
 ### 目标
 
-为当前已经实现的核心行为补单元测试，尤其是：
-
-- AppState 状态转移
-- filter input 光标编辑
-- tab filter 隔离
-- 分页边界
-- Schema/Data 切换
-- filter parse 和匹配
-- 文件树 root 边界
-
-### P1.1 AppState 测试模块
-
-建议先在 `src/app.rs` 末尾加：
-
-```rust
-#[cfg(test)]
-mod tests {
-    // ...
-}
-```
-
-后续如果测试变多，再拆成：
-
-```text
-src/app/tests.rs
-```
-
-或：
-
-```text
-tests/app_state.rs
-```
-
-当前先放在模块内最简单。
-
-### P1.2 filter input 光标编辑测试
-
-当前相关方法：
-
-```rust
-insert_filter_char
-backspace_filter_char
-delete_filter_char
-move_filter_cursor_left
-move_filter_cursor_right
-move_filter_cursor_home
-move_filter_cursor_end
-complete_filter_field
-```
-
-需要测试：
-
-#### 插入字符在光标位置
-
-初始：
-
-```text
-filter_input = "city  上海"
-filter_cursor = 5
-```
-
-插入：
-
-```text
-'='
-```
-
-期望：
-
-```text
-filter_input = "city = 上海"
-filter_cursor 在 '=' 后
-```
-
-#### Backspace 删除光标前字符
-
-输入：
-
-```text
-city = 上海
-```
-
-光标在末尾。
-
-执行：
-
-```rust
-backspace_filter_char()
-```
-
-期望删除 `海`，不能破坏 UTF-8。
-
-#### Delete 删除光标处字符
-
-输入：
-
-```text
-city = 上海
-```
-
-光标在 `上` 前。
-
-执行：
-
-```rust
-delete_filter_char()
-```
-
-期望：
-
-```text
-city = 海
-```
-
-#### 左右移动光标按字符移动，不按字节移动
-
-输入：
-
-```text
-a你b
-```
-
-从末尾连续左移，光标位置应落在合法 UTF-8 边界：
-
-```text
-a你|b
-a|你b
-|a你b
-```
-
-不能 panic。
-
-#### Home/End
-
-输入：
-
-```text
-score > 80
-```
-
-- Home 后 cursor = 0
-- End 后 cursor = len
-
-#### 空字符串边界
-
-对空输入执行：
-
-```rust
-backspace_filter_char()
-delete_filter_char()
-move_filter_cursor_left()
-move_filter_cursor_right()
-```
-
-都不能 panic，cursor 应保持 0。
-
-### P1.3 字段 Tab 补全测试
-
-准备一个带 columns 的 AppState，例如：
-
-```rust
-columns = vec![
-    ColumnInfo { name: "city" },
-    ColumnInfo { name: "score" },
-    ColumnInfo { name: "status" },
-]
-```
-
-测试点：
-
-#### 单候选补全
-
-输入：
-
-```text
-ci
-```
-
-光标末尾，执行：
-
-```rust
-complete_filter_field(false)
-```
-
-期望：
-
-```text
-city
-```
-
-#### 多候选循环
-
-字段：
-
-```text
-score
-status
-```
-
-输入：
-
-```text
-s
-```
-
-第一次 Tab 可能补全为：
-
-```text
-score
-```
-
-第二次 Tab 应循环到：
-
-```text
-status
-```
-
-再次回到：
-
-```text
-score
-```
-
-顺序按当前实现排序后的结果。
-
-#### Shift-Tab 反向循环
-
-输入当前 token：
-
-```text
-score
-```
-
-执行：
-
-```rust
-complete_filter_field(true)
-```
-
-期望切到上一个候选。
-
-#### 只补全当前 token
-
-输入：
-
-```text
-city = s
-```
-
-光标在 `s` 后。
-
-执行 Tab。
-
-期望只替换 `s`，不要影响：
-
-```text
-city =
-```
-
-#### 无匹配
-
-输入：
-
-```text
-zzz
-```
-
-执行 Tab。
-
-期望输入不变，status 显示：
-
-```text
-No column matches 'zzz'
-```
-
-### P1.4 tab filter 隔离测试
-
-当前行为目标：每个 tab 独立保存：
-
-```rust
-filter
-offset
-rows
-columns
-selected_row
-selected_col
-scroll_x
-```
-
-测试流程：
-
-1. 创建 app。
-2. 构造两个 DataPage：file A、file B。
-3. `apply_page(file_a, page_a)`。
-4. 设置：
+在 Cell Detail 弹窗中支持内容内搜索，减少长 JSON / 长文本手工滚动成本。
+
+### 当前情况
+
+- 详情弹窗已经支持：
+  - JSON 高亮
+  - 滚动
+  - `y` 复制当前 cell
+  - `Y` 复制当前整行 JSON
+- 但**还没有**弹窗内搜索。
+
+### 建议实现
+
+- 仅在 Cell Detail 打开时复用 `/` 进入 detail search 模式；
+- 搜索状态不要污染主表格的 filter 输入；
+- 至少支持：
+  - 输入搜索词
+  - 下一个匹配
+  - 上一个匹配
+  - 清空搜索
+  - 搜索结果高亮
+- 搜索滚动应自动把当前匹配滚动到可见区域；
+- 无匹配时给出短状态提示，不报错退出。
+
+### 建议拆分
+
+1. 给 detail view 增加独立搜索状态：
 
    ```rust
-   app.filter = Some("score > 80".to_string())
+   detail_search_input
+   detail_search_matches
+   detail_search_index
    ```
 
-5. `apply_page(file_b, page_b)`。
-6. 设置：
+2. 新增匹配与跳转逻辑。
+3. 渲染层高亮当前匹配。
+4. 补测试：
+   - 空搜索
+   - 单结果
+   - 多结果前后跳转
+   - 搜索后滚动 clamp
 
-   ```rust
-   app.filter = Some("city = 上海".to_string())
-   ```
+### 验收
 
-7. `switch_to_tab(0)`。
-8. 期望：
-
-   ```rust
-   app.filter == Some("score > 80")
-   ```
-
-9. `switch_to_tab(1)`。
-10. 期望：
-
-    ```rust
-    app.filter == Some("city = 上海")
-    ```
-
-注意：当前 `apply_page` 新打开文件时会清空 filter，这是合理的。测试时给 tab 设置 filter 后要触发 `save_active_tab_state()`，可以通过 `switch_to_tab` 间接触发。
-
-### P1.5 分页边界测试
-
-#### 第一页不能上一页
-
-```rust
-offset = 0
-previous_page_offset() == None
+```bash
+cargo fmt
+cargo test --offline
 ```
 
-#### 下一页 offset
-
-```rust
-offset = 0
-page_size = 50
-total_rows = Some(120)
-next_page_offset() == Some(50)
-```
-
-#### 最后一页不能下一页
-
-```rust
-offset = 100
-page_size = 50
-total_rows = Some(120)
-next_page_offset() == None
-```
-
-#### 未知 total rows 下允许下一页
-
-筛选后：
-
-```rust
-total_rows = None
-rows 非空
-```
-
-期望：
-
-```rust
-next_page_offset() == Some(offset + page_size)
-```
-
-#### 空 rows 不能下一页
-
-```rust
-rows = []
-next_page_offset() == None
-```
-
-### P1.6 Schema/Data 切换测试
-
-目标：Schema/Data 切换不破坏：
-
-- filter
-- offset
-- selected_row
-- selected_col
-- rows
-- columns
-
-测试流程：
-
-1. 打开一个 page。
-2. 设置：
-
-   ```rust
-   offset = 50
-   selected_row = 3
-   selected_col = 2
-   filter = Some("score > 80")
-   ```
-
-3. 执行：
-
-   ```rust
-   toggle_schema_view()
-   ```
-
-4. 期望：
-
-   ```rust
-   view == Schema
-   ```
-
-5. 再执行：
-
-   ```rust
-   toggle_schema_view()
-   ```
-
-6. 期望：
-
-   ```rust
-   view == Data
-   ```
-
-7. 状态仍保持。
-
-### P1.7 filter parse 与匹配测试
-
-当前 filter parse 在 `src/data.rs` 内部，相关函数是私有的：
-
-```rust
-parse_filter
-split_filter
-unquote_filter_value
-FilterExpr::matches
-```
-
-推荐先在 `src/data.rs` 内部加测试模块，直接测私有函数。
-
-测试点：
-
-- 支持操作符：`=`、`!=`、`>`、`>=`、`<`、`<=`、`contains`
-- unknown column 返回 `AppError::InvalidFilter`
-- 非法表达式返回错误，例如：`score`、`score >`、`= 1`
-- 字符串引号剥离：`city = "上海"`、`city = '上海'`
-- 数字比较：cell detail `98.5` 匹配 `score > 80`
-- `contains` 大小写不敏感：`note contains TEST` 匹配 `test row`
-
-### P1.8 文件树 root 边界测试
-
-当前文件树逻辑在：
+### 建议提交信息
 
 ```text
-src/file_browser.rs
+Add search within cell detail popup
 ```
-
-测试点：不能越过 root。
-
-构造临时目录：
-
-```text
-/tmp/root
-/tmp/root/sub
-```
-
-进入 `sub` 后，尝试进入 root 之外路径应返回：
-
-```rust
-AppError::OutsideRoot
-```
-
-需要临时目录。可以引入 dev-dependency：
-
-```toml
-[dev-dependencies]
-tempfile = "3"
-```
-
-如果不想新增依赖，也可以用 `std::env::temp_dir()` 手动创建唯一目录，但 `tempfile` 更稳。
 
 ---
 
-## P2：文档同步
+## R2：筛选下推 / 筛选执行模型升级（原 P5.2）
 
 ### 目标
 
-当前 README 仍然偏早期阶段，应更新为当前可用功能说明。
+改进当前筛选执行方式，减少“先格式化再匹配文本”的局限，为后续更强过滤能力留演进空间。
 
-### P2.1 README 更新
+### 当前情况
 
-需要包含：
+当前筛选能力已经可用，但仍有这些限制：
 
-#### 项目简介
+- 筛选主要基于格式化后的 cell 文本；
+- 不能利用 Parquet predicate pushdown；
+- 不支持括号和更复杂优先级；
+- 排序和筛选仍以当前自定义 DSL 为主；
+- 还没有引入 DataFusion。
 
-说明这是 Rust Parquet TUI Viewer。
+### 建议路线
 
-#### 快速运行
+短期仍优先保留内置 DSL，不急着切到 DataFusion。
 
-```bash
-cargo run -- path/to/file.parquet
-```
+优先顺序建议：
 
-不带文件：
+1. **先把匹配逻辑从“显示文本”向“原始类型值”推进**
+   - 数字按数字比较
+   - 布尔按布尔比较
+   - 日期/时间类型按结构化值比较
+   - `contains` 仍可保留字符串语义
+2. **按列裁剪读取/比较成本**
+   - 只对筛选实际涉及的列做匹配准备
+3. **保留 DataFusion 评估为后续分支，不默认引入**
+   - 仅当需要更强表达式能力或谓词下推收益明显时再评估
 
-```bash
-cargo run
-```
+### 不要做的事
 
-#### 生成测试数据
+- 不要把 DataFusion 错误、表达式语法或异步模型直接泄漏到 TUI；
+- 不要为了“支持复杂筛选”而默认全量加载整个文件；
+- 不要把当前 DSL 描述成安全沙箱。
 
-```bash
-cargo run --bin generate-test-parquet
-cargo run --bin generate-empty-test-parquet
-cargo run --bin generate-complex-test-parquet
-cargo run --bin generate-pagination-test-parquet
-```
+### 建议拆分
 
-对应文件：
+#### R2.1 类型化比较
 
-```text
-parquet/people.parquet
-parquet/empty.parquet
-parquet/complex_types.parquet
-parquet/pagination.parquet
-```
+- 把 filter predicate 的比较尽量下沉到结构化值层；
+- 保持 UI 语义不变；
+- 先覆盖：
+  - 数字
+  - 布尔
+  - 日期 / 时间 / 时间戳
 
-#### 快捷键
+#### R2.2 列级最小化匹配
 
-| 快捷键 | 行为 |
-|---|---|
-| `q` | 退出 |
-| `h` | 帮助 |
-| `d` | 聚焦文件树 |
-| `s` | Schema/Data 切换 |
-| `/` | 筛选 |
-| `r` | 重置筛选 |
-| `n` / `PageDown` | 下一页 |
-| `p` / `PageUp` | 上一页 |
-| `j` / `k` / `↑` / `↓` | 行移动 |
-| `J` / `K` | 当前页底部 / 顶部 |
-| `←` / `→` / `l` | 列移动 |
-| `H` / `L` | 第一列 / 最后一列 |
-| `Enter` / `Space` | Cell Detail |
-| `Tab` / `Shift-Tab` | tab 切换；筛选弹窗内字段补全 |
-| `y` | OSC52 复制当前 cell |
+- 解析 filter AST 后，提取被引用列；
+- 匹配阶段只访问必要列数据；
+- 不改变当前分页接口语义。
 
-#### 鼠标
+#### R2.3 DataFusion 可行性调研（可选）
 
-说明：
+- 单独形成设计结论，不直接落代码也可以；
+- 只回答：
+  - 是否值得引入；
+  - 会带来哪些收益；
+  - 会破坏哪些当前架构边界；
+  - 如果引入，边界应如何封装。
 
-- 点击文件树展开目录 / 打开 parquet
-- 拖动侧边栏右边框调整宽度
-- 点击表格选中 cell
-- 双击 cell 打开 detail
-- 滚轮上下移动行 / 翻页
-- 横向滚轮移动列
-- 点击 tab 切换文件
-
-#### 筛选语法
-
-当前是受限语法：
-
-```text
-column op value
-```
-
-操作符：
-
-```text
-= != > >= < <= contains
-```
-
-示例：
-
-```text
-score > 80
-city = 上海
-note contains test
-row_id >= 100
-```
-
-说明：
-
-- `contains` 大小写不敏感
-- 数字比较优先按数字解析
-- 字符串可以不加引号，也可以使用 `'` 或 `"`
-- 不支持 SQL
-- 不支持 and/or
-- 不是安全沙箱
-- 筛选后总数目前显示 `?`
-
-#### 当前限制
-
-- 分页 offset 当前顺序跳过，超大 offset 后续优化
-- 筛选基于格式化后的 cell 文本
-- 筛选后的 count 暂未知
-- Schema 视图暂不支持滚动 / 排序
-- 暂无列排序
-- 暂无导出
-
-### P2.2 docs/design/09 更新
-
-更新：
-
-```text
-docs/design/09-milestones-and-decisions.md
-```
-
-标记：
-
-- M1 已实现
-- M2 已实现
-- M3 第一版已实现
-
-并记录当前筛选决策：
-
-- 使用受限内置 filter 语法
-- 暂未使用 DataFusion
-- filter count 暂未知
-- 后续再考虑 DataFusion / DSL
-
-### P2.3 新增 docs/usage.md
-
-如果 README 不想太长，可以新增：
-
-```text
-docs/usage.md
-```
-
-内容包括：
-
-- 启动方式
-- 快捷键
-- 筛选语法
-- 测试数据
-- 限制
-
-README 中链接过去。
-
----
-
-## P3：筛选增强
-
-### P3.1 支持 and/or
-
-目标语法：
-
-```text
-score > 80 and active = true
-city = 上海 or city = 東京
-```
-
-推荐实现：不要直接上 parser generator。可以做简单 AST：
-
-```rust
-enum FilterAst {
-    Predicate(FilterExpr),
-    And(Box<FilterAst>, Box<FilterAst>),
-    Or(Box<FilterAst>, Box<FilterAst>),
-}
-```
-
-解析策略：
-
-1. 按不在引号内的 ` or ` 分割。
-2. 每段按不在引号内的 ` and ` 分割。
-3. 每个 leaf 用现有 `parse_filter`。
-
-注意：需要处理引号内的字符串：
-
-```text
-note contains "A and B"
-```
-
-不能被拆开。
-
-### P3.2 筛选补全候选弹窗
-
-当前行为：Tab 补全字段名，但没有可视候选列表。
-
-目标：筛选弹窗中显示候选列表：
-
-```text
-> ci
-
-columns:
-  city
-```
-
-多候选：
-
-```text
-columns:
-  score
-  status
-```
-
-AppState 新增：
-
-```rust
-filter_completion_candidates: Vec<String>
-filter_completion_index: usize
-```
-
-行为：
-
-- 输入变化后清空 candidates
-- 按 Tab 生成 candidates
-- 多次 Tab 切换 index
-- 绘制 popup 时展示 candidates
-
-### P3.3 筛选历史
-
-目标：在筛选弹窗中支持：
-
-```text
-↑ / ↓
-```
-
-切换历史筛选条件。
-
-AppState 新增：
-
-```rust
-filter_history: Vec<String>
-filter_history_index: Option<usize>
-```
-
-行为：
-
-- Apply 成功后加入 history
-- 重复 filter 不重复加入
-- ↑ 上一条
-- ↓ 下一条
-- Esc 不改变 history
-
-### P3.4 筛选 count
-
-当前筛选后：
-
-```text
-total_rows = None
-```
-
-状态栏显示：
-
-```text
-?
-```
-
-推荐先做手动 count。
-
-新增快捷键：
-
-```text
-c
-```
-
-表示 count current filter。
-
-Data Access 新增：
-
-```rust
-count_with_filter(filter: Option<&str>) -> Result<usize>
-```
-
-实现：
-
-- 无 filter：metadata num_rows
-- 有 filter：扫描匹配数
-- 后续优化
-
-长期建议将 `Option<usize>` 改成：
-
-```rust
-CountState {
-    Unknown,
-    Known(usize),
-    Failed(String),
-}
-```
-
----
-
-## P4：M4 健壮性和值显示体验
-
-### P4.1 Formatting 层拆分
-
-当前大量格式化逻辑在：
-
-```text
-src/data.rs
-```
-
-建议拆到：
-
-```text
-src/formatting.rs
-```
-
-当前 `formatting.rs` 只有：
-
-```rust
-truncate_to_width
-```
-
-建议迁移：
-
-- `CellView`
-- `format_cell`
-- `format_scalar`
-- `format_list_*`
-- `format_struct_*`
-- `format_map_*`
-- `binary_detail`
-- JSON pretty 相关
-
-建议边界：
-
-- `src/data.rs`：ParquetFileDataSource、read_page、schema extraction、RecordBatch -> RowView 调用 formatting
-- `src/formatting.rs`：Arrow value -> CellView、truncation、detail formatting
-- `src/tui.rs`：只使用 CellView display/detail，不感知 Arrow 类型
-
-### P4.2 更多 Arrow 类型支持
-
-当前重点支持：
-
-- Bool
-- Int
-- Float
-- Utf8
-- Binary
-- List
-- Struct
-- Map
-
-需要补：
-
-#### Date / Time / Timestamp
-
-类型：
-
-```rust
-DataType::Date32
-DataType::Date64
-DataType::Time32(_)
-DataType::Time64(_)
-DataType::Timestamp(unit, timezone)
-DataType::Duration(_)
-```
-
-需要格式化为人类可读值。
-
-#### Decimal
-
-```rust
-DataType::Decimal128(_, _)
-DataType::Decimal256(_, _)
-```
-
-需要显示 scale。
-
-#### Dictionary
-
-```rust
-DataType::Dictionary(_, _)
-```
-
-需要解析实际 value，而不是 debug。
-
-#### FixedSizeBinary
-
-表格显示：
-
-```text
-<N bytes>
-```
-
-detail 显示 hex。
-
-### P4.3 Cell Detail 增强
-
-#### 语法高亮
-
-JSON-like 详情中：
-
-- key 黄色
-- string 绿色
-- number cyan
-- null gray
-- bool magenta
-
-实现成本中等，因为当前 detail 是纯 String。要高亮需要改为：
-
-```rust
-Vec<Line<'static>>
-```
-
-或者在 TUI 层解析。建议等 formatting 稳定后再做。
-
-#### 复制行
-
-新增快捷键：
-
-```text
-Y
-```
-
-复制当前整行 JSON-like。
-
-需要：
-
-```rust
-selected_row_detail_json()
-```
-
-#### 详情弹窗搜索
-
-快捷键：
-
-```text
-/
-```
-
-但 `/` 已用于 filter。详情弹窗内可以复用 `/` 做 detail search。不建议马上做。
-
-#### 滚动边界
-
-当前 detail scroll 可以无限加。
-
-建议 draw 时 clamp：
-
-```rust
-let scroll = app.cell_detail_scroll.min(max_scroll)
-```
-
-需要根据 popup 高度和 lines 数计算 `max_scroll`。
-
-### P4.4 表格体验
-
-#### 动态列宽
-
-当前列宽固定 24。可以改成：
-
-- 最小 12
-- 最大 40
-- 根据 header 和当前页内容估算
-- 剩余空间分配给最后一列
-
-注意避免宽字符错位。
-
-#### 显示行号列
-
-左侧增加固定 row number：
-
-```text
-# | col1 | col2
-51| ...
-```
-
-帮助分页阅读。
-
-#### Schema 视图滚动
-
-当前 Schema 视图不滚动。
-
-后续可复用：
-
-```rust
-selected_schema_row
-schema_scroll
-```
-
-或者简单使用 selected_row。
-
----
-
-## P5：性能优化与架构清理
-
-### P5.1 Row group aware pagination
-
-当前实现：
-
-```text
-读取并跳过 offset 行
-```
-
-大 offset 会慢。
-
-优化目标：利用 Parquet metadata row groups。
-
-思路：
-
-1. 计算 offset 落在哪个 row group。
-2. 跳过前面的 row group。
-3. 从目标 row group 开始读取。
-
-如果 parquet arrow reader 支持：
-
-```rust
-with_row_groups(...)
-```
-
-可以构造需要的 row groups。
-
-注意：如果从中间 row group 开始，仍需在目标 row group 内跳过 partial offset。
-
-### P5.2 筛选下推
-
-当前筛选基于格式化后文本。
-
-后续路线：
-
-#### 路线 A：继续内置 DSL
-
-优点：
-
-- 轻
-- 可控
-- 不泄露 DataFusion
-
-缺点：
-
-- 无法利用 Parquet predicate pushdown
-- 表达能力有限
-
-#### 路线 B：DataFusion
-
-优点：
-
-- 表达能力强
-- 可 count/filter/page
-- 未来支持 SQL-like
-
-缺点：
-
-- 依赖重
-- 异步/执行模型复杂
-- 表达式语义和错误类型需要封装
-
-推荐：短期继续内置 DSL。等功能稳定后再评估 DataFusion。
-
-### P5.3 状态机与 TUI 解耦
-
-当前 TUI 中还有较多动作处理：
-
-```rust
-handle_key
-handle_mouse
-load_page
-apply_filter
-```
-
-长期建议引入：
-
-```rust
-enum Action
-enum DataCommand
-```
-
-分步改法：
-
-1. 定义 `Action`。
-2. 把 key -> action 单独函数化。
-3. AppState 添加 `handle_action`。
-4. 返回 `Option<DataCommand>`。
-5. TUI 执行 DataCommand。
-
-好处：
-
-- AppState 可测试
-- TUI 只负责事件转 action
-- Data Access 由外层执行 command
-
----
-
-## 推荐执行顺序
-
-### Step 1：补 AppState 测试
-
-优先做：
-
-```text
-filter input 光标编辑
-tab filter 隔离
-分页边界
-Schema/Data 切换
-```
-
-验收：
-
-```bash
-cargo test --offline
-```
-
-### Step 2：补 data filter 测试
-
-在 `src/data.rs` 内部测试：
-
-```text
-parse_filter
-split_filter
-unquote_filter_value
-FilterExpr::matches
-```
-
-验收：
-
-```bash
-cargo test --offline
-```
-
-### Step 3：更新 README
-
-让 README 反映当前真实能力。
-
-验收：
-
-- README 中有启动方式
-- 有生成测试数据命令
-- 有快捷键表
-- 有筛选语法
-- 有限制说明
-
-### Step 4：更新设计状态
-
-更新：
-
-```text
-docs/design/09-milestones-and-decisions.md
-```
-
-标记：
-
-- M1 已实现
-- M2 已实现
-- M3 第一版已实现
-- 当前筛选选择：内置受限 DSL
-
-### Step 5：筛选增强
-
-先做：
-
-```text
-and/or
-```
-
-再做：
-
-```text
-候选弹窗
-筛选历史
-手动 count
-```
-
-### Step 6：M4 格式化拆分
-
-把 `src/data.rs` 里的格式化逻辑迁移到 `src/formatting.rs`。
-
-要求：
-
-- TUI 不感知 Arrow 类型
-- Data Access 不承载复杂显示策略
-- 保持测试通过
-
----
-
-## 每一步建议提交
-
-建议每个小步骤独立提交。
-
-示例提交信息：
-
-```text
-Add filter input state tests
-Add filter parser tests
-Document current TUI usage
-Record implemented milestones
-Support and/or filter expressions
-Show filter completion candidates
-Move cell formatting into formatting layer
-```
-
----
-
-## 验证命令
-
-每次代码改动至少跑：
+### 验收
 
 ```bash
 cargo fmt
@@ -1252,7 +190,168 @@ cargo check --offline
 cargo test --offline
 ```
 
-涉及生成器时跑：
+### 建议提交信息
+
+```text
+Improve typed filter evaluation
+```
+
+或：
+
+```text
+Evaluate DataFusion as an optional filter backend
+```
+
+---
+
+## R3：状态机与 TUI 解耦（原 P5.3）
+
+### 目标
+
+进一步把“事件解释”和“状态变更”从 TUI 层抽离，让：
+
+- TUI 只负责事件采集、布局和渲染；
+- AppState 负责状态迁移；
+- Data Access 负责执行读取命令。
+
+### 当前情况
+
+虽然当前分层已经比早期清晰很多，但 TUI 里仍然有较多按键分支直接驱动应用行为。长期看，这会增加：
+
+- 行为测试难度；
+- 快捷键改动成本；
+- 视图模式分支复杂度；
+- 新增交互时的回归风险。
+
+### 目标形态
+
+建议逐步收敛到：
+
+```rust
+enum Action
+enum DataCommand
+```
+
+方向：
+
+- TUI：`event -> Action`
+- AppState：`handle_action(action) -> Option<DataCommand>`
+- 外层协调：执行 `DataCommand` 并把结果回写 AppState
+
+### 建议拆分
+
+#### R3.1 提取 Action
+
+- 先把键盘事件映射提取成纯函数；
+- 不要一开始就重写所有分支；
+- 先覆盖最稳定的主路径：
+  - 翻页
+  - 行列移动
+  - schema/data 切换
+  - 排序
+  - 导出
+
+#### R3.2 AppState handle_action
+
+- 把纯状态变更移动到 AppState；
+- 对需要读取数据的动作返回 `DataCommand`；
+- 保持错误信息仍由 AppState 持有。
+
+#### R3.3 为 Action 层补测试
+
+- 每个 Action 至少验证：
+  - 前置条件
+  - 状态变化
+  - 是否发出正确的 `DataCommand`
+
+### 注意事项
+
+- 不要一次性重写全部 TUI 事件分支；
+- 不要把 Arrow / parquet 具体类型引进 TUI；
+- 不要破坏现有快捷键语义，尤其：
+  - `h` 继续保留给帮助
+  - `←` 继续是左移，不把 `h` 绑定回左移
+
+### 验收
+
+```bash
+cargo fmt
+cargo check --offline
+cargo test --offline
+```
+
+### 建议提交信息
+
+```text
+Decouple actions from the TUI event layer
+```
+
+---
+
+## 可继续但不属于原始 P1-P5 主线的增强项
+
+这些不是当前必须项，但如果用户继续要求“再往前推进”，优先从这里挑小步工作。
+
+### E1：导出路径可配置
+
+当前 `e` 会把当前页导出到系统临时目录，文件名形如：
+
+```text
+<stem>.page.csv
+```
+
+可继续增强为：
+
+- 导出到当前工作目录；
+- 支持 CLI 参数指定导出目录；
+- 或增加导出路径输入弹窗。
+
+前提不变：**仍然只导出当前页，不做隐式全量导出。**
+
+### E2：状态栏更明确显示排序 / count 状态
+
+当前功能已经可用，但还可以进一步明确：
+
+- 当前是否处于页内排序；
+- 当前排序列和方向；
+- `CountState::Failed` 的可读提示；
+- 未知总数与已知总数的差异提示。
+
+---
+
+## 推荐实现顺序
+
+建议按以下顺序继续：
+
+```text
+R1 > R3 > R2
+```
+
+原因：
+
+- **R1** 改动面最小，用户感知最直接；
+- **R3** 是长期维护性收益最大的重构；
+- **R2** 风险最高，适合在行为和分层更稳定后推进。
+
+如果要先做一个最小可交付增强，优先选：
+
+```text
+R1：Cell Detail 内搜索
+```
+
+---
+
+## 最小验收命令
+
+代码改动后至少执行其一：
+
+```bash
+cargo fmt
+cargo check --offline
+cargo test --offline
+```
+
+若改动涉及测试数据生成器，再额外执行：
 
 ```bash
 cargo check --bin generate-test-parquet --offline
@@ -1260,18 +359,3 @@ cargo check --bin generate-empty-test-parquet --offline
 cargo check --bin generate-complex-test-parquet --offline
 cargo check --bin generate-pagination-test-parquet --offline
 ```
-
-只改文档时，不需要强制运行 Rust 编译或测试命令。
-
----
-
-## 当前最新提交参考
-
-低级模型接手前建议先执行：
-
-```bash
-git log --oneline -8
-cargo test --offline
-```
-
-确认基线正常。
