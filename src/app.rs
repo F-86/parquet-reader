@@ -1,0 +1,294 @@
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
+
+use crate::{
+    cli::AppConfig,
+    data::{ColumnInfo, DataPage, RowView},
+    error::Result,
+    file_browser::{FileEntryKind, FileSidebar},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Empty,
+    Data,
+}
+
+#[derive(Debug)]
+pub enum SidebarOpenResult {
+    None,
+    File(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+pub struct FileTab {
+    pub file_path: PathBuf,
+    pub title: String,
+    pub columns: Vec<ColumnInfo>,
+    pub rows: Vec<RowView>,
+    pub selected_row: usize,
+    pub selected_col: usize,
+    pub scroll_x: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct MouseClickState {
+    pub column: u16,
+    pub row: u16,
+    pub at: Instant,
+}
+#[derive(Debug)]
+pub struct AppState {
+    pub root_dir: PathBuf,
+    pub sidebar: FileSidebar,
+    pub tabs: Vec<FileTab>,
+    pub active_tab: Option<usize>,
+    pub active_file: Option<PathBuf>,
+    pub view: ViewMode,
+    pub page_size: usize,
+    pub columns: Vec<ColumnInfo>,
+    pub rows: Vec<RowView>,
+    pub selected_row: usize,
+    pub selected_col: usize,
+    pub scroll_x: usize,
+    pub table_visible_column_count: usize,
+    pub sidebar_width: u16,
+    pub resizing_sidebar: bool,
+    pub show_help: bool,
+    pub show_cell_detail: bool,
+    pub cell_detail_scroll: u16,
+    pub status: String,
+    pub error: Option<String>,
+    pub last_mouse_click: Option<MouseClickState>,
+    pub should_quit: bool,
+}
+
+impl AppState {
+    pub fn new(config: AppConfig) -> Result<Self> {
+        let sidebar = FileSidebar::new(config.root_directory.clone())?;
+        Ok(Self {
+            root_dir: config.root_directory,
+            sidebar,
+            tabs: Vec::new(),
+            active_tab: None,
+            active_file: config.initial_file_path,
+            view: ViewMode::Empty,
+            page_size: config.page_size,
+            columns: Vec::new(),
+            rows: Vec::new(),
+            selected_row: 0,
+            selected_col: 0,
+            scroll_x: 0,
+            table_visible_column_count: 1,
+            sidebar_width: 30,
+            resizing_sidebar: false,
+            show_help: false,
+            show_cell_detail: false,
+            cell_detail_scroll: 0,
+            status: "Press d to focus file list, h for help, q to quit".to_string(),
+            error: None,
+            last_mouse_click: None,
+            should_quit: false,
+        })
+    }
+
+    pub fn tab_title(&self) -> String {
+        self.active_tab
+            .and_then(|index| self.tabs.get(index))
+            .map(|tab| tab.title.clone())
+            .or_else(|| {
+                self.active_file
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "[No file]".to_string())
+    }
+
+    pub fn apply_page(&mut self, path: PathBuf, page: DataPage) {
+        self.save_active_tab_state();
+        let title = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let tab = FileTab {
+            file_path: path,
+            title,
+            columns: page.columns,
+            rows: page.rows,
+            selected_row: 0,
+            selected_col: 0,
+            scroll_x: 0,
+        };
+        self.tabs.push(tab);
+        let index = self.tabs.len() - 1;
+        self.restore_tab_state(index);
+        self.error = None;
+        self.sidebar.focused = false;
+        self.status = format!(
+            "Loaded {} rows, {} columns",
+            self.rows.len(),
+            self.columns.len()
+        );
+    }
+
+    pub fn tab_index_for_path(&self, path: &Path) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.file_path == path)
+    }
+
+    pub fn switch_to_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        self.save_active_tab_state();
+        self.restore_tab_state(index);
+        self.status = format!("Switched to tab {}: {}", index + 1, self.tab_title());
+    }
+
+    pub fn next_tab(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let next = self
+            .active_tab
+            .map_or(0, |index| (index + 1) % self.tabs.len());
+        self.switch_to_tab(next);
+    }
+
+    pub fn previous_tab(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let previous = self.active_tab.map_or(0, |index| {
+            if index == 0 {
+                self.tabs.len() - 1
+            } else {
+                index - 1
+            }
+        });
+        self.switch_to_tab(previous);
+    }
+
+    fn save_active_tab_state(&mut self) {
+        let Some(index) = self.active_tab else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        tab.selected_row = self.selected_row;
+        tab.selected_col = self.selected_col;
+        tab.scroll_x = self.scroll_x;
+    }
+
+    fn restore_tab_state(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get(index).cloned() else {
+            return;
+        };
+        self.active_tab = Some(index);
+        self.active_file = Some(tab.file_path);
+        self.view = ViewMode::Data;
+        self.columns = tab.columns;
+        self.rows = tab.rows;
+        self.selected_row = tab.selected_row.min(self.rows.len().saturating_sub(1));
+        self.selected_col = tab.selected_col.min(self.columns.len().saturating_sub(1));
+        self.scroll_x = tab.scroll_x.min(self.columns.len().saturating_sub(1));
+        self.show_cell_detail = false;
+        self.cell_detail_scroll = 0;
+    }
+
+    pub fn set_error(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        self.status = message.clone();
+        self.error = Some(message);
+    }
+
+    pub fn open_selected_sidebar_entry(&mut self) -> Result<SidebarOpenResult> {
+        let Some(entry) = self.sidebar.selected_entry().cloned() else {
+            return Ok(SidebarOpenResult::None);
+        };
+        match entry.kind {
+            FileEntryKind::Directory => {
+                self.sidebar.toggle_directory(&entry.path)?;
+                self.status = format!("Toggled directory: {}", entry.path.display());
+                Ok(SidebarOpenResult::None)
+            }
+            FileEntryKind::ParquetFile => Ok(SidebarOpenResult::File(entry.path)),
+            FileEntryKind::OtherFile => {
+                self.status = "Select a .parquet file".to_string();
+                Ok(SidebarOpenResult::None)
+            }
+        }
+    }
+
+    pub fn select_row_previous(&mut self) {
+        self.selected_row = self.selected_row.saturating_sub(1);
+    }
+
+    pub fn select_row_next(&mut self) {
+        if self.selected_row + 1 < self.rows.len() {
+            self.selected_row += 1;
+        }
+    }
+
+    pub fn select_col_previous(&mut self) {
+        self.selected_col = self.selected_col.saturating_sub(1);
+        if self.selected_col < self.scroll_x {
+            self.scroll_x = self.selected_col;
+        }
+    }
+
+    pub fn select_col_next(&mut self) {
+        if self.selected_col + 1 < self.columns.len() {
+            self.selected_col += 1;
+            let visible_count = self.table_visible_column_count.max(1);
+            if self.selected_col >= self.scroll_x + visible_count {
+                self.scroll_x = self.selected_col + 1 - visible_count;
+            }
+        }
+    }
+
+    pub fn select_first_col(&mut self) {
+        self.selected_col = 0;
+        self.scroll_x = 0;
+    }
+
+    pub fn select_last_col(&mut self) {
+        if self.columns.is_empty() {
+            return;
+        }
+        self.selected_col = self.columns.len() - 1;
+        let visible_count = self.table_visible_column_count.max(1);
+        self.scroll_x = self.columns.len().saturating_sub(visible_count);
+    }
+
+    pub fn open_cell_detail(&mut self) {
+        if self.selected_cell_value().is_some() {
+            self.show_cell_detail = true;
+            self.cell_detail_scroll = 0;
+        }
+    }
+
+    pub fn selected_cell_value(&self) -> Option<&str> {
+        self.rows
+            .get(self.selected_row)
+            .and_then(|row| row.cells.get(self.selected_col))
+            .map(|cell| cell.detail.as_str())
+    }
+
+    pub fn status_text(&self) -> String {
+        if let Some(error) = &self.error {
+            format!("error: {error}")
+        } else if self.active_file.is_none() {
+            format!("{} | root: {}", self.status, self.root_dir.display())
+        } else {
+            self.status.clone()
+        }
+    }
+
+    pub fn active_file_path(&self) -> Option<&Path> {
+        self.active_file.as_deref()
+    }
+}

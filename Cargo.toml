@@ -1,0 +1,30 @@
+[package]
+name = "parquet-reader"
+version = "0.1.0"
+edition = "2024"
+default-run = "parquet-reader"
+
+[dependencies]
+base64 = "0.22"
+arrow-array = "56"
+arrow-schema = "56"
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
+parquet = { version = "56", features = ["arrow"] }
+ratatui = "0.29"
+serde_json = "1"
+thiserror = "2"
+unicode-width = "0.2"
+
+# Test data generators. Keep each generated Parquet file owned by exactly one binary.
+[[bin]]
+name = "generate-test-parquet"
+path = "src/bin/generate_test_parquet.rs"
+
+[[bin]]
+name = "generate-empty-test-parquet"
+path = "src/bin/generate_empty_test_parquet.rs"
+
+[[bin]]
+name = "generate-complex-test-parquet"
+path = "src/bin/generate_complex_test_parquet.rs"
