@@ -27,6 +27,8 @@ pub struct ColumnInfo {
 pub struct DataPage {
     pub columns: Vec<ColumnInfo>,
     pub rows: Vec<RowView>,
+    pub offset: usize,
+    pub total_rows: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +65,10 @@ impl ParquetFileDataSource {
     }
 
     pub fn read_first_page(&self, limit: usize) -> Result<DataPage> {
+        self.read_page(0, limit)
+    }
+
+    pub fn read_page(&self, offset: usize, limit: usize) -> Result<DataPage> {
         let file = File::open(&self.path).map_err(|source| AppError::FileMetadata {
             path: self.path.clone(),
             source,
@@ -73,6 +79,7 @@ impl ParquetFileDataSource {
                 source,
             }
         })?;
+        let total_rows = Some(builder.metadata().file_metadata().num_rows().max(0) as usize);
         let schema = builder.schema();
         let columns = schema
             .fields()
@@ -88,14 +95,20 @@ impl ParquetFileDataSource {
 
         let mut reader = builder.with_batch_size(limit.max(1)).build()?;
         let mut rows = Vec::new();
+        let mut skipped = 0usize;
         while rows.len() < limit {
             let Some(batch) = reader.next().transpose()? else {
                 break;
             };
-            append_batch_rows(&batch, &mut rows, limit);
+            append_batch_rows(&batch, &mut rows, offset, &mut skipped, limit);
         }
 
-        Ok(DataPage { columns, rows })
+        Ok(DataPage {
+            columns,
+            rows,
+            offset,
+            total_rows,
+        })
     }
 
     #[allow(dead_code)]
@@ -116,10 +129,20 @@ pub fn validate_parquet_readable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn append_batch_rows(batch: &RecordBatch, rows: &mut Vec<RowView>, limit: usize) {
+fn append_batch_rows(
+    batch: &RecordBatch,
+    rows: &mut Vec<RowView>,
+    offset: usize,
+    skipped: &mut usize,
+    limit: usize,
+) {
     for row_index in 0..batch.num_rows() {
         if rows.len() >= limit {
             break;
+        }
+        if *skipped < offset {
+            *skipped += 1;
+            continue;
         }
         let cells = batch
             .columns()

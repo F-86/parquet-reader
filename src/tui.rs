@@ -300,12 +300,16 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
         }
         KeyCode::Up | KeyCode::Char('k') => app.select_row_previous(),
         KeyCode::Down | KeyCode::Char('j') => app.select_row_next(),
+        KeyCode::Char('K') => app.select_row_top(),
+        KeyCode::Char('J') => app.select_row_bottom(),
         KeyCode::Left => app.select_col_previous(),
         KeyCode::Right | KeyCode::Char('l') => app.select_col_next(),
         KeyCode::Char('H') => app.select_first_col(),
         KeyCode::Char('L') => app.select_last_col(),
         KeyCode::Tab => app.next_tab(),
         KeyCode::BackTab => app.previous_tab(),
+        KeyCode::Char('n') | KeyCode::PageDown => load_next_page(app),
+        KeyCode::Char('p') | KeyCode::PageUp => load_previous_page(app),
         KeyCode::Enter | KeyCode::Char(' ') => app.open_cell_detail(),
         KeyCode::Char('y') => copy_selected_cell(app),
         _ => {}
@@ -362,6 +366,34 @@ fn load_file(app: &mut AppState, path: PathBuf) {
     let data_source = ParquetFileDataSource::new(path.clone());
     match data_source.read_first_page(app.page_size) {
         Ok(page) => app.apply_page(path, page),
+        Err(error) => app.set_error(error.to_string()),
+    }
+}
+
+fn load_next_page(app: &mut AppState) {
+    let Some(offset) = app.next_page_offset() else {
+        app.status = "Already at last page".to_string();
+        return;
+    };
+    load_page(app, offset);
+}
+
+fn load_previous_page(app: &mut AppState) {
+    let Some(offset) = app.previous_page_offset() else {
+        app.status = "Already at first page".to_string();
+        return;
+    };
+    load_page(app, offset);
+}
+
+fn load_page(app: &mut AppState, offset: usize) {
+    let Some(path) = app.current_file_path() else {
+        app.status = "No file opened".to_string();
+        return;
+    };
+    let data_source = ParquetFileDataSource::new(path);
+    match data_source.read_page(offset, app.page_size) {
+        Ok(page) => app.replace_active_page(page),
         Err(error) => app.set_error(error.to_string()),
     }
 }
@@ -672,8 +704,11 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  j/k or ↑/↓        Move row selection"),
+        Line::from("  J / K             Jump to page bottom / top"),
         Line::from("  ← / l / →         Move selected column"),
         Line::from("  H / L             Jump to first / last column"),
+        Line::from("  n / PageDown      Next page"),
+        Line::from("  p / PageUp        Previous page"),
         Line::from("  Enter / Space     Open selected cell detail"),
         Line::from("  Double click      Open clicked cell detail"),
         Line::from("  y                 Copy selected cell via OSC52"),

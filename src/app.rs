@@ -28,6 +28,8 @@ pub struct FileTab {
     pub title: String,
     pub columns: Vec<ColumnInfo>,
     pub rows: Vec<RowView>,
+    pub offset: usize,
+    pub total_rows: Option<usize>,
     pub selected_row: usize,
     pub selected_col: usize,
     pub scroll_x: usize,
@@ -50,6 +52,8 @@ pub struct AppState {
     pub page_size: usize,
     pub columns: Vec<ColumnInfo>,
     pub rows: Vec<RowView>,
+    pub offset: usize,
+    pub total_rows: Option<usize>,
     pub selected_row: usize,
     pub selected_col: usize,
     pub scroll_x: usize,
@@ -78,6 +82,8 @@ impl AppState {
             page_size: config.page_size,
             columns: Vec::new(),
             rows: Vec::new(),
+            offset: 0,
+            total_rows: None,
             selected_row: 0,
             selected_col: 0,
             scroll_x: 0,
@@ -118,6 +124,8 @@ impl AppState {
             title,
             columns: page.columns,
             rows: page.rows,
+            offset: page.offset,
+            total_rows: page.total_rows,
             selected_row: 0,
             selected_col: 0,
             scroll_x: 0,
@@ -128,8 +136,10 @@ impl AppState {
         self.error = None;
         self.sidebar.focused = false;
         self.status = format!(
-            "Loaded {} rows, {} columns",
-            self.rows.len(),
+            "Loaded rows {}-{} of {} · columns {}",
+            self.row_start_display(),
+            self.row_end_display(),
+            self.total_rows_display(),
             self.columns.len()
         );
     }
@@ -171,6 +181,85 @@ impl AppState {
         self.switch_to_tab(previous);
     }
 
+    pub fn current_file_path(&self) -> Option<PathBuf> {
+        self.active_file.clone()
+    }
+
+    pub fn next_page_offset(&self) -> Option<usize> {
+        if self.active_file.is_none() || self.rows.is_empty() {
+            return None;
+        }
+        let next = self.offset.saturating_add(self.page_size);
+        if self.total_rows.is_some_and(|total| next >= total) {
+            None
+        } else {
+            Some(next)
+        }
+    }
+
+    pub fn previous_page_offset(&self) -> Option<usize> {
+        if self.active_file.is_none() || self.offset == 0 {
+            None
+        } else {
+            Some(self.offset.saturating_sub(self.page_size))
+        }
+    }
+
+    pub fn replace_active_page(&mut self, page: DataPage) {
+        self.columns = page.columns;
+        self.rows = page.rows;
+        self.offset = page.offset;
+        self.total_rows = page.total_rows;
+        self.selected_row = 0;
+        self.selected_col = self.selected_col.min(self.columns.len().saturating_sub(1));
+        self.scroll_x = self.scroll_x.min(self.columns.len().saturating_sub(1));
+        self.show_cell_detail = false;
+        self.cell_detail_scroll = 0;
+        self.error = None;
+        self.status = format!(
+            "Loaded rows {}-{} of {} · page {} · columns {}",
+            self.row_start_display(),
+            self.row_end_display(),
+            self.total_rows_display(),
+            self.page_display(),
+            self.columns.len()
+        );
+        self.save_active_tab_state();
+    }
+
+    pub fn page_display(&self) -> String {
+        let current = if self.rows.is_empty() {
+            0
+        } else {
+            self.offset / self.page_size + 1
+        };
+        match self.total_rows {
+            Some(0) => "0/0".to_string(),
+            Some(total) => {
+                let pages = total.div_ceil(self.page_size);
+                format!("{current}/{pages}")
+            }
+            None => current.to_string(),
+        }
+    }
+
+    pub fn row_start_display(&self) -> usize {
+        if self.rows.is_empty() {
+            0
+        } else {
+            self.offset + 1
+        }
+    }
+
+    pub fn row_end_display(&self) -> usize {
+        self.offset + self.rows.len()
+    }
+
+    pub fn total_rows_display(&self) -> String {
+        self.total_rows
+            .map_or_else(|| "?".to_string(), |total| total.to_string())
+    }
+
     fn save_active_tab_state(&mut self) {
         let Some(index) = self.active_tab else {
             return;
@@ -178,6 +267,10 @@ impl AppState {
         let Some(tab) = self.tabs.get_mut(index) else {
             return;
         };
+        tab.columns = self.columns.clone();
+        tab.rows = self.rows.clone();
+        tab.offset = self.offset;
+        tab.total_rows = self.total_rows;
         tab.selected_row = self.selected_row;
         tab.selected_col = self.selected_col;
         tab.scroll_x = self.scroll_x;
@@ -192,6 +285,8 @@ impl AppState {
         self.view = ViewMode::Data;
         self.columns = tab.columns;
         self.rows = tab.rows;
+        self.offset = tab.offset;
+        self.total_rows = tab.total_rows;
         self.selected_row = tab.selected_row.min(self.rows.len().saturating_sub(1));
         self.selected_col = tab.selected_col.min(self.columns.len().saturating_sub(1));
         self.scroll_x = tab.scroll_x.min(self.columns.len().saturating_sub(1));
@@ -230,6 +325,30 @@ impl AppState {
     pub fn select_row_next(&mut self) {
         if self.selected_row + 1 < self.rows.len() {
             self.selected_row += 1;
+        }
+    }
+
+    pub fn select_row_top(&mut self) {
+        self.selected_row = 0;
+    }
+
+    pub fn select_row_bottom(&mut self) {
+        self.selected_row = self.rows.len().saturating_sub(1);
+    }
+
+    pub fn selected_row_display(&self) -> usize {
+        if self.rows.is_empty() {
+            0
+        } else {
+            self.offset + self.selected_row + 1
+        }
+    }
+
+    pub fn selected_col_display(&self) -> usize {
+        if self.columns.is_empty() {
+            0
+        } else {
+            self.selected_col + 1
         }
     }
 
@@ -284,7 +403,17 @@ impl AppState {
         } else if self.active_file.is_none() {
             format!("{} | root: {}", self.status, self.root_dir.display())
         } else {
-            self.status.clone()
+            format!(
+                "{} | rows {}-{} of {} | page {} | cols {} | selected r{} c{}",
+                self.status,
+                self.row_start_display(),
+                self.row_end_display(),
+                self.total_rows_display(),
+                self.page_display(),
+                self.columns.len(),
+                self.selected_row_display(),
+                self.selected_col_display(),
+            )
         }
     }
 
