@@ -164,16 +164,16 @@ fn append_batch_rows(
         if rows.len() >= limit {
             break;
         }
-        if *skipped < offset {
-            *skipped += 1;
-            continue;
-        }
         let cells = batch
             .columns()
             .iter()
             .map(|array| format_cell(Arc::clone(array), row_index))
             .collect::<Vec<_>>();
         if filter.is_some_and(|filter| !filter.matches(&cells)) {
+            continue;
+        }
+        if *skipped < offset {
+            *skipped += 1;
             continue;
         }
         rows.push(RowView { cells });

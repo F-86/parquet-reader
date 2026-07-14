@@ -129,9 +129,33 @@ fn handle_mouse(app: &mut AppState, mouse: MouseEvent) {
                 app.resizing_sidebar = false;
             }
         }
+        MouseEventKind::ScrollUp => scroll_table_up(app),
+        MouseEventKind::ScrollDown => scroll_table_down(app),
         MouseEventKind::ScrollLeft => app.select_col_previous(),
         MouseEventKind::ScrollRight => app.select_col_next(),
         _ => {}
+    }
+}
+
+fn scroll_table_up(app: &mut AppState) {
+    if app.show_filter_popup || app.sidebar.focused {
+        return;
+    }
+    if app.selected_row > 0 {
+        app.select_row_previous();
+    } else {
+        load_previous_page(app);
+    }
+}
+
+fn scroll_table_down(app: &mut AppState) {
+    if app.show_filter_popup || app.sidebar.focused {
+        return;
+    }
+    if app.selected_row + 1 < app.rows.len() {
+        app.select_row_next();
+    } else {
+        load_next_page(app);
     }
 }
 
@@ -282,6 +306,8 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
             KeyCode::Right => app.move_filter_cursor_right(),
             KeyCode::Home => app.move_filter_cursor_home(),
             KeyCode::End => app.move_filter_cursor_end(),
+            KeyCode::Tab => app.complete_filter_field(false),
+            KeyCode::BackTab => app.complete_filter_field(true),
             KeyCode::Char(ch) => app.insert_filter_char(ch),
             _ => {}
         }
@@ -842,7 +868,7 @@ fn draw_filter_popup(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "←/→ Home/End Delete/Backspace: edit  ·  Enter: apply  ·  Esc: cancel",
+            "Tab: complete column  ·  ←/→ Home/End Delete/Backspace: edit  ·  Enter: apply",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -869,6 +895,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("  d                 Focus file sidebar"),
         Line::from("  s                 Toggle Schema view"),
         Line::from("  /                 Open filter popup"),
+        Line::from("  Tab in filter     Complete/cycle column name"),
         Line::from("  r                 Reset filter"),
         Line::from(""),
         Line::from(vec![Span::styled(

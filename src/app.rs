@@ -528,6 +528,57 @@ impl AppState {
         self.filter_cursor = self.filter_input.len();
     }
 
+    pub fn complete_filter_field(&mut self, reverse: bool) {
+        self.filter_cursor = self.filter_cursor.min(self.filter_input.len());
+        let token_start = self.filter_input[..self.filter_cursor]
+            .rfind(char::is_whitespace)
+            .map_or(0, |index| index + 1);
+        let token_end = self.filter_input[self.filter_cursor..]
+            .find(char::is_whitespace)
+            .map_or(self.filter_input.len(), |index| self.filter_cursor + index);
+        let prefix = &self.filter_input[token_start..self.filter_cursor];
+
+        let mut matches = self
+            .columns
+            .iter()
+            .filter(|column| column.name.starts_with(prefix))
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+
+        if matches.is_empty() {
+            self.status = format!("No column matches '{prefix}'");
+            return;
+        }
+        matches.sort();
+
+        let current_token = &self.filter_input[token_start..token_end];
+        let selected = matches
+            .iter()
+            .position(|name| name == current_token)
+            .map(|index| {
+                if reverse {
+                    if index == 0 {
+                        matches.len() - 1
+                    } else {
+                        index - 1
+                    }
+                } else {
+                    (index + 1) % matches.len()
+                }
+            })
+            .unwrap_or(0);
+        let replacement = &matches[selected];
+        self.filter_input
+            .replace_range(token_start..token_end, replacement);
+        self.filter_cursor = token_start + replacement.len();
+
+        if matches.len() > 1 {
+            self.status = format!("Column matches: {}", matches.join(", "));
+        } else {
+            self.status = format!("Completed column: {replacement}");
+        }
+    }
+
     pub fn filter_display(&self) -> String {
         self.filter.clone().unwrap_or_else(|| "-".to_string())
     }
