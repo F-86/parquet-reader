@@ -95,6 +95,12 @@ pub struct AppState {
     pub show_help: bool,
     pub show_cell_detail: bool,
     pub cell_detail_scroll: u16,
+    pub detail_search_input: String,
+    pub detail_search_cursor: usize,
+    pub detail_search_active: bool,
+    pub detail_search_query: Option<String>,
+    pub detail_search_matches: Vec<(usize, usize, usize)>,
+    pub detail_search_index: Option<usize>,
     pub status: String,
     pub error: Option<String>,
     pub last_mouse_click: Option<MouseClickState>,
@@ -149,6 +155,12 @@ impl AppState {
             show_help: false,
             show_cell_detail: false,
             cell_detail_scroll: 0,
+            detail_search_input: String::new(),
+            detail_search_cursor: 0,
+            detail_search_active: false,
+            detail_search_query: None,
+            detail_search_matches: Vec::new(),
+            detail_search_index: None,
             status: "Press d to focus file list, h for help, q to quit".to_string(),
             error: None,
             last_mouse_click: None,
@@ -279,6 +291,7 @@ impl AppState {
         self.scroll_x = self.scroll_x.min(self.columns.len().saturating_sub(1));
         self.show_cell_detail = false;
         self.cell_detail_scroll = 0;
+        self.reset_detail_search();
         self.show_filter_popup = false;
         self.error = None;
         self.update_count_state();
@@ -398,6 +411,7 @@ impl AppState {
         self.schema_scroll = 0;
         self.show_cell_detail = false;
         self.cell_detail_scroll = 0;
+        self.reset_detail_search();
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
@@ -554,7 +568,144 @@ impl AppState {
         if self.selected_cell_value().is_some() {
             self.show_cell_detail = true;
             self.cell_detail_scroll = 0;
+            self.reset_detail_search();
         }
+    }
+
+    pub fn reset_detail_search(&mut self) {
+        self.detail_search_input.clear();
+        self.detail_search_cursor = 0;
+        self.detail_search_active = false;
+        self.detail_search_query = None;
+        self.detail_search_matches.clear();
+        self.detail_search_index = None;
+    }
+
+    pub fn start_detail_search(&mut self) {
+        self.detail_search_active = true;
+        self.detail_search_input.clear();
+        self.detail_search_cursor = 0;
+    }
+
+    pub fn cancel_detail_search(&mut self) {
+        self.detail_search_active = false;
+        self.detail_search_input.clear();
+        self.detail_search_cursor = 0;
+    }
+
+    pub fn insert_detail_search_char(&mut self, ch: char) {
+        self.detail_search_cursor = self
+            .detail_search_cursor
+            .min(self.detail_search_input.len());
+        self.detail_search_input
+            .insert(self.detail_search_cursor, ch);
+        self.detail_search_cursor += ch.len_utf8();
+    }
+
+    pub fn backspace_detail_search_char(&mut self) {
+        self.detail_search_cursor = self
+            .detail_search_cursor
+            .min(self.detail_search_input.len());
+        if self.detail_search_cursor == 0 {
+            return;
+        }
+        let previous = self.detail_search_input[..self.detail_search_cursor]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        self.detail_search_input
+            .drain(previous..self.detail_search_cursor);
+        self.detail_search_cursor = previous;
+    }
+
+    /// Execute the detail search: find all byte ranges of the query in the
+    /// pretty-printed cell value and store them for navigation and highlighting.
+    pub fn execute_detail_search(&mut self) {
+        let query = self.detail_search_input.trim().to_string();
+        if query.is_empty() {
+            self.detail_search_query = None;
+            self.detail_search_matches.clear();
+            self.detail_search_index = None;
+            self.detail_search_active = false;
+            return;
+        }
+
+        let value = self
+            .selected_cell_value()
+            .map(crate::tui::display_cell_detail_value)
+            .unwrap_or_default();
+
+        let query_len = query.len();
+        let mut matches = Vec::new();
+        let mut search_from = 0usize;
+        while search_from <= value.len().saturating_sub(query_len) {
+            if let Some(pos) = value[search_from..].find(&query) {
+                let abs_pos = search_from + pos;
+                matches.push((abs_pos, abs_pos + query_len, query_len));
+                search_from = abs_pos + query_len;
+            } else {
+                break;
+            }
+        }
+
+        if matches.is_empty() {
+            self.status = format!("No matches for '{query}'");
+        } else {
+            self.status = format!("Found {} matches for '{query}'", matches.len());
+        }
+        self.detail_search_query = Some(query);
+        self.detail_search_matches = matches;
+        self.detail_search_index = if self.detail_search_matches.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.detail_search_active = false;
+        self.scroll_to_current_detail_match();
+    }
+
+    pub fn next_detail_search_match(&mut self) {
+        if self.detail_search_matches.is_empty() {
+            return;
+        }
+        let next = match self.detail_search_index {
+            None => 0,
+            Some(i) => (i + 1) % self.detail_search_matches.len(),
+        };
+        self.detail_search_index = Some(next);
+        self.scroll_to_current_detail_match();
+        self.status = format!("Match {}/{}", next + 1, self.detail_search_matches.len());
+    }
+
+    pub fn previous_detail_search_match(&mut self) {
+        if self.detail_search_matches.is_empty() {
+            return;
+        }
+        let prev = match self.detail_search_index {
+            None => 0,
+            Some(0) => self.detail_search_matches.len() - 1,
+            Some(i) => i - 1,
+        };
+        self.detail_search_index = Some(prev);
+        self.scroll_to_current_detail_match();
+        self.status = format!("Match {}/{}", prev + 1, self.detail_search_matches.len());
+    }
+
+    /// Scroll the detail popup so the current match is visible.
+    fn scroll_to_current_detail_match(&mut self) {
+        let Some(index) = self.detail_search_index else {
+            return;
+        };
+        let Some(&(start, _, _)) = self.detail_search_matches.get(index) else {
+            return;
+        };
+        let value = self
+            .selected_cell_value()
+            .map(crate::tui::display_cell_detail_value)
+            .unwrap_or_default();
+        let line_num = value[..start.min(value.len())].matches('\n').count();
+        self.cell_detail_scroll = line_num as u16;
     }
 
     pub fn toggle_schema_view(&mut self) {
@@ -1323,5 +1474,173 @@ mod tests {
         assert_eq!(state.filter, Some("score > 80".to_string()));
         assert_eq!(state.columns.len(), 4);
         assert_eq!(state.rows.len(), 5);
+    }
+
+    // R1: empty search produces no matches and clears query
+    #[test]
+    fn detail_search_empty_clears_query() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        set_columns(&mut state, &["data"]);
+        state.rows = vec![RowView {
+            cells: vec![CellView::new("hello world".to_string())],
+        }];
+        state.selected_row = 0;
+        state.selected_col = 0;
+        state.open_cell_detail();
+        state.start_detail_search();
+        state.execute_detail_search();
+        assert!(state.detail_search_query.is_none());
+        assert!(state.detail_search_matches.is_empty());
+        assert!(state.detail_search_index.is_none());
+        assert!(!state.detail_search_active);
+    }
+
+    // R1: single match is found and indexed
+    #[test]
+    fn detail_search_single_match() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        set_columns(&mut state, &["data"]);
+        let value = r#"{"name":"alpha","count":42}"#;
+        state.rows = vec![RowView {
+            cells: vec![CellView::new(value.to_string())],
+        }];
+        state.selected_row = 0;
+        state.selected_col = 0;
+        state.open_cell_detail();
+        state.start_detail_search();
+        for ch in "alpha".chars() {
+            state.insert_detail_search_char(ch);
+        }
+        state.execute_detail_search();
+        assert_eq!(state.detail_search_query.as_deref(), Some("alpha"));
+        assert_eq!(state.detail_search_matches.len(), 1);
+        assert_eq!(state.detail_search_index, Some(0));
+    }
+
+    // R1: multiple matches can be navigated forward and backward
+    #[test]
+    fn detail_search_multiple_matches_navigate() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        set_columns(&mut state, &["data"]);
+        let value = r#"{"a":"foo","b":"foo","c":"bar"}"#;
+        state.rows = vec![RowView {
+            cells: vec![CellView::new(value.to_string())],
+        }];
+        state.selected_row = 0;
+        state.selected_col = 0;
+        state.open_cell_detail();
+        state.start_detail_search();
+        for ch in "foo".chars() {
+            state.insert_detail_search_char(ch);
+        }
+        state.execute_detail_search();
+        assert_eq!(state.detail_search_matches.len(), 2);
+        assert_eq!(state.detail_search_index, Some(0));
+
+        state.next_detail_search_match();
+        assert_eq!(state.detail_search_index, Some(1));
+
+        state.next_detail_search_match();
+        assert_eq!(state.detail_search_index, Some(0));
+
+        state.previous_detail_search_match();
+        assert_eq!(state.detail_search_index, Some(1));
+    }
+
+    // R1: no match reports status without crashing
+    #[test]
+    fn detail_search_no_match_reports_status() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        set_columns(&mut state, &["data"]);
+        state.rows = vec![RowView {
+            cells: vec![CellView::new("hello world".to_string())],
+        }];
+        state.selected_row = 0;
+        state.selected_col = 0;
+        state.open_cell_detail();
+        state.start_detail_search();
+        for ch in "xyz".chars() {
+            state.insert_detail_search_char(ch);
+        }
+        state.execute_detail_search();
+        assert!(state.detail_search_matches.is_empty());
+        assert!(state.detail_search_index.is_none());
+        assert!(state.status.contains("No matches"));
+    }
+
+    // R1: search state is reset when reopening cell detail
+    #[test]
+    fn detail_search_resets_on_reopen() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        set_columns(&mut state, &["data"]);
+        state.rows = vec![RowView {
+            cells: vec![CellView::new("hello world".to_string())],
+        }];
+        state.selected_row = 0;
+        state.selected_col = 0;
+        state.open_cell_detail();
+        state.start_detail_search();
+        for ch in "hello".chars() {
+            state.insert_detail_search_char(ch);
+        }
+        state.execute_detail_search();
+        assert!(state.detail_search_query.is_some());
+
+        // Close and reopen
+        state.show_cell_detail = false;
+        state.reset_detail_search();
+        state.open_cell_detail();
+        assert!(state.detail_search_query.is_none());
+        assert!(state.detail_search_matches.is_empty());
+        assert!(!state.detail_search_active);
+    }
+
+    // R1: backspace in search input removes last char
+    #[test]
+    fn detail_search_backspace_removes_char() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        set_columns(&mut state, &["data"]);
+        state.rows = vec![RowView {
+            cells: vec![CellView::new("hello".to_string())],
+        }];
+        state.selected_row = 0;
+        state.selected_col = 0;
+        state.open_cell_detail();
+        state.start_detail_search();
+        state.insert_detail_search_char('a');
+        state.insert_detail_search_char('b');
+        state.backspace_detail_search_char();
+        assert_eq!(state.detail_search_input, "a");
+        assert_eq!(state.detail_search_cursor, 1);
+    }
+
+    // R1: scroll clamps to current match line
+    #[test]
+    fn detail_search_scroll_to_match() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        set_columns(&mut state, &["data"]);
+        // Multi-line JSON: the match "target" appears on line 3
+        let value = r#"{"a":1,"b":2,"c":"target","d":4}"#;
+        state.rows = vec![RowView {
+            cells: vec![CellView::new(value.to_string())],
+        }];
+        state.selected_row = 0;
+        state.selected_col = 0;
+        state.open_cell_detail();
+        state.start_detail_search();
+        for ch in "target".chars() {
+            state.insert_detail_search_char(ch);
+        }
+        state.execute_detail_search();
+        // After search, scroll should point to the line containing the match.
+        // In pretty-printed JSON, "target" is on its own line.
+        assert!(state.cell_detail_scroll > 0);
     }
 }

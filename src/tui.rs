@@ -269,9 +269,39 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
     }
 
     if app.show_cell_detail {
+        if app.detail_search_active {
+            match key.code {
+                KeyCode::Esc => app.cancel_detail_search(),
+                KeyCode::Enter => app.execute_detail_search(),
+                KeyCode::Backspace => app.backspace_detail_search_char(),
+                KeyCode::Char(ch) => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        match ch {
+                            'u' => {
+                                app.detail_search_input.clear();
+                                app.detail_search_cursor = 0;
+                            }
+                            'c' => app.should_quit = true,
+                            _ => {}
+                        }
+                    } else {
+                        app.insert_detail_search_char(ch);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => app.show_cell_detail = false,
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
+                app.show_cell_detail = false;
+                app.reset_detail_search();
+            }
             KeyCode::Char('q') => app.should_quit = true,
+            KeyCode::Char('/') => app.start_detail_search(),
+            KeyCode::Char('n') => app.next_detail_search_match(),
+            KeyCode::Char('N') => app.previous_detail_search_match(),
             KeyCode::Up | KeyCode::Char('k') => {
                 app.cell_detail_scroll = app.cell_detail_scroll.saturating_sub(1)
             }
@@ -475,7 +505,7 @@ fn copy_selected_row(app: &mut AppState) {
     }
 }
 
-fn display_cell_detail_value(value: &str) -> String {
+pub fn display_cell_detail_value(value: &str) -> String {
     let trimmed = value.trim();
     if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
         return value.to_string();
@@ -513,6 +543,139 @@ pub fn highlight_json_detail(raw: &str) -> Vec<Line<'static>> {
                 line.split_at(line.find(|c: char| !c.is_whitespace()).unwrap_or(0));
             let mut rendered = Line::from(Span::raw(indent.to_string()));
             rendered.spans.extend(highlight_line(rest));
+            rendered
+        })
+        .collect()
+}
+
+/// Render pretty-printed JSON with syntax highlighting and search match
+/// highlighting. Current match is shown in reverse-video; other matches are
+/// underlined. Non-JSON text is also searched.
+fn highlight_json_detail_with_search(raw: &str, app: &AppState) -> Vec<Line<'static>> {
+    let trimmed = raw.trim();
+    let pretty = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .and_then(|json| serde_json::to_string_pretty(&json).ok())
+    } else {
+        None
+    };
+    let text = pretty.unwrap_or_else(|| raw.to_string());
+
+    let current_match = app
+        .detail_search_index
+        .and_then(|i| app.detail_search_matches.get(i).copied());
+
+    // Build a set of byte ranges to highlight (non-current matches).
+    let other_matches: Vec<(usize, usize)> = app
+        .detail_search_matches
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| Some(*i) != app.detail_search_index)
+        .map(|(_, &(s, e, _))| (s, e))
+        .collect();
+
+    // Walk line by line, tracking byte offset in the full text.
+    let mut byte_offset = 0usize;
+    text.lines()
+        .map(|line| {
+            let line_start = byte_offset;
+            let line_end = line_start + line.len();
+            byte_offset = line_end + 1; // +1 for '\n'
+
+            let (indent, rest) =
+                line.split_at(line.find(|c: char| !c.is_whitespace()).unwrap_or(0));
+            let mut rendered = Line::from(Span::raw(indent.to_string()));
+
+            // Apply JSON syntax highlighting to the rest, then overlay search
+            // matches by post-processing the spans.
+            let syntax_spans = highlight_line(rest);
+            let rest_start = line_start + indent.len();
+
+            // Convert syntax spans to (byte_start, byte_end, content, style)
+            // relative to the full text, then split at match boundaries.
+            let mut char_spans: Vec<(usize, usize, String, Option<Style>)> = Vec::new();
+            let mut rel_pos = 0usize;
+            for span in &syntax_spans {
+                let s_start = rest_start + rel_pos;
+                let s_end = s_start + span.content.len();
+                char_spans.push((s_start, s_end, span.content.to_string(), Some(span.style)));
+                rel_pos += span.content.len();
+            }
+
+            // Now split char_spans by match boundaries and apply highlight.
+            let mut all_ranges: Vec<(usize, usize, bool)> = Vec::new();
+            // (start, end, is_current)
+            for (s, e) in &other_matches {
+                if *s < line_end && *e > line_start {
+                    let clamped_s = (*s).max(line_start);
+                    let clamped_e = (*e).min(line_end);
+                    all_ranges.push((clamped_s, clamped_e, false));
+                }
+            }
+            if let Some((cs, ce, _)) = current_match {
+                if cs < line_end && ce > line_start {
+                    let clamped_s = cs.max(line_start);
+                    let clamped_e = ce.min(line_end);
+                    all_ranges.push((clamped_s, clamped_e, true));
+                }
+            }
+            all_ranges.sort_by_key(|r| r.0);
+
+            // Merge overlapping ranges, preferring current match style.
+            all_ranges.dedup_by(|a, b| {
+                if a.0 == b.0 && a.1 == b.1 {
+                    true
+                } else {
+                    false
+                }
+            });
+
+            // Build final spans by walking char_spans and splitting at ranges.
+            let match_style = Style::default().add_modifier(Modifier::UNDERLINED);
+            let current_style = Style::default().add_modifier(Modifier::REVERSED);
+
+            for (s_start, s_end, content, style) in &char_spans {
+                let mut pos = *s_start;
+                for &(rs, re, is_current) in &all_ranges {
+                    if re <= pos || rs >= *s_end {
+                        continue;
+                    }
+                    // Part before the match.
+                    if rs > pos {
+                        let before_len = rs - pos;
+                        let before: String =
+                            content[pos - s_start..pos - s_start + before_len].to_string();
+                        rendered
+                            .spans
+                            .push(Span::styled(before, style.unwrap_or_default()));
+                    }
+                    // The match itself.
+                    let match_start = rs.max(pos);
+                    let match_end = re.min(*s_end);
+                    let match_len = match_end - match_start;
+                    let match_text: String = content
+                        [match_start - s_start..match_start - s_start + match_len]
+                        .to_string();
+                    let ms = if is_current {
+                        current_style
+                    } else {
+                        match_style
+                    };
+                    // Merge with existing style if any.
+                    let final_style = style.map(|s| s.patch(ms)).unwrap_or(ms);
+                    rendered.spans.push(Span::styled(match_text, final_style));
+                    pos = match_end;
+                }
+                // Remaining part after all matches in this span.
+                if pos < *s_end {
+                    let remaining: String = content[pos - s_start..].to_string();
+                    rendered
+                        .spans
+                        .push(Span::styled(remaining, style.unwrap_or_default()));
+                }
+            }
+
             rendered
         })
         .collect()
@@ -1054,10 +1217,29 @@ fn draw_cell_detail(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     let popup = centered_rect(72, 62, area);
     let column = app.columns.get(app.selected_col);
     let value = display_cell_detail_value(app.selected_cell_value().unwrap_or(""));
-    let detail_lines = highlight_json_detail(&value);
-    let title = column
-        .map(|column| format!("Cell Detail: {}", column.name))
-        .unwrap_or_else(|| "Cell Detail".to_string());
+
+    let title = if app.detail_search_active {
+        "Cell Detail (search)".to_string()
+    } else if app.detail_search_query.is_some() {
+        let total = app.detail_search_matches.len();
+        let current = app.detail_search_index.map(|i| i + 1).unwrap_or(0);
+        format!(
+            "Cell Detail: {}  [{}/{}]",
+            column.map(|c| c.name.as_str()).unwrap_or(""),
+            current,
+            total
+        )
+    } else {
+        column
+            .map(|column| format!("Cell Detail: {}", column.name))
+            .unwrap_or_else(|| "Cell Detail".to_string())
+    };
+
+    let detail_lines = if app.detail_search_query.is_some() {
+        highlight_json_detail_with_search(&value, app)
+    } else {
+        highlight_json_detail(&value)
+    };
 
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
@@ -1080,10 +1262,47 @@ fn draw_cell_detail(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     lines.push(Line::from(""));
     lines.extend(detail_lines);
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "j/k or mouse wheel: scroll  ·  y: copy cell  ·  Y: copy row  ·  Esc/Enter/Space: close",
-        Style::default().fg(Color::DarkGray),
-    )));
+
+    if app.detail_search_active {
+        let input = &app.detail_search_input;
+        let cursor = app.detail_search_cursor.min(input.len());
+        let before: String = input[..cursor].to_string();
+        let cursor_char: String = input[cursor..]
+            .chars()
+            .next()
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        let after: String = if cursor < input.len() {
+            input[cursor + cursor_char.len()..].to_string()
+        } else {
+            String::new()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("search: ", Style::default().fg(Color::Cyan)),
+            Span::raw(before),
+            Span::styled(
+                cursor_char,
+                Style::default().add_modifier(Modifier::REVERSED),
+            ),
+            Span::raw(after),
+        ]));
+    } else {
+        let match_info = app
+            .detail_search_query
+            .as_ref()
+            .map(|q| {
+                let total = app.detail_search_matches.len();
+                let current = app.detail_search_index.map(|i| i + 1).unwrap_or(0);
+                format!("  ·  search '{q}': {current}/{total}  (n/N navigate, / new)")
+            })
+            .unwrap_or_default();
+        lines.push(Line::from(Span::styled(
+            format!(
+                "j/k: scroll  ·  y: copy cell  ·  Y: copy row  ·  /: search{match_info}  ·  Esc: close"
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
 
     // Clamp scroll so the popup never scrolls past its content.
     let inner_height = popup.height.saturating_sub(2) as usize;
@@ -1249,6 +1468,18 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
         )]),
         Line::from("  Tab / Shift-Tab   Next / previous tab"),
         Line::from("  mouse click tab   Switch tab"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Cell detail popup",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  j/k or ↑/↓        Scroll content"),
+        Line::from("  y / Y             Copy cell / row via OSC52"),
+        Line::from("  /                 Search within detail"),
+        Line::from("  n / N             Next / previous search match"),
+        Line::from("  Esc/Enter/Space   Close popup"),
         Line::from(""),
         Line::from(
             "M1 implements startup, file picker, tab bar, help, schema and first page display.",
