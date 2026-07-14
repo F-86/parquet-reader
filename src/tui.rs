@@ -837,6 +837,23 @@ fn draw_schema(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
+/// Build the table header label for a column, appending a sort marker
+/// (`▲` ascending / `▼` descending) when this is the active sort column.
+fn column_header_label(
+    column: &crate::data::ColumnInfo,
+    sort_column: Option<usize>,
+    sort_ascending: bool,
+) -> String {
+    let mut label = format!("{}:{}", column.name, column.logical_type);
+    if let Some(physical_type) = &column.physical_type {
+        label.push_str(&format!("/{physical_type}"));
+    }
+    if sort_column == Some(column.index) {
+        label.push_str(if sort_ascending { " ▲" } else { " ▼" });
+    }
+    label
+}
+
 fn draw_table(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     const MIN_COLUMN_WIDTH: u16 = 12;
     const MAX_COLUMN_WIDTH: u16 = 40;
@@ -889,15 +906,18 @@ fn draw_table(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
         .collect::<Vec<_>>();
 
     let header_cells = visible_columns.iter().enumerate().map(|(i, column)| {
-        let mut label = format!("{}:{}", column.name, column.logical_type);
-        if let Some(physical_type) = &column.physical_type {
-            label.push_str(&format!("/{physical_type}"));
-        }
-        Cell::from(truncate_to_width(&label, cell_display_widths[i])).style(
+        let label = column_header_label(column, app.sort_column, app.sort_ascending);
+        let sorted = app.sort_column == Some(column.index);
+        let style = if sorted {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
             Style::default()
                 .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
+                .add_modifier(Modifier::BOLD)
+        };
+        Cell::from(truncate_to_width(&label, cell_display_widths[i])).style(style)
     });
     let header = Row::new(
         std::iter::once(Cell::from(Span::styled(
@@ -1225,6 +1245,30 @@ mod tests {
     fn highlight_falls_back_for_plain_text() {
         let lines = highlight_json_detail("just a plain string cell");
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn column_header_label_marks_sorted_column() {
+        let column = crate::data::ColumnInfo {
+            index: 2,
+            name: "score".to_string(),
+            logical_type: "Float64".to_string(),
+            physical_type: None,
+        };
+        // Unsorted: no marker.
+        assert_eq!(column_header_label(&column, None, true), "score:Float64");
+        // Ascending marker on the active sort column.
+        assert_eq!(
+            column_header_label(&column, Some(2), true),
+            "score:Float64 ▲"
+        );
+        // Descending marker.
+        assert_eq!(
+            column_header_label(&column, Some(2), false),
+            "score:Float64 ▼"
+        );
+        // A different sort column does not mark this one.
+        assert_eq!(column_header_label(&column, Some(0), true), "score:Float64");
     }
 }
 
