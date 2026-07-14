@@ -48,6 +48,7 @@ cargo run
 | `p` / `PageUp` | 上一页 |
 | `Enter` / `Space` | 打开选中 cell 详情 |
 | `y` | OSC52 复制当前 cell 到系统剪贴板 |
+| `Y` | OSC52 复制当前整行 (JSON) 到系统剪贴板 |
 
 ### Tab
 
@@ -64,7 +65,18 @@ cargo run
 | `PageUp` / `PageDown` | 大步滚动 |
 | `Home` | 回到顶部 |
 | `y` | 复制当前 cell |
+| `Y` | 复制当前整行 (JSON) |
 | `Esc` / `Enter` / `Space` | 关闭详情 |
+
+### Schema 视图
+
+| 快捷键 | 行为 |
+|---|---|
+| `s` | 切换回 Data 视图 |
+| `j` / `k` / `↑` / `↓` | 选择字段 |
+| `J` / `K` | 第一个 / 最后一个字段 |
+| `y` | 复制当前字段 cell |
+| `Y` | 复制当前整行 (JSON) |
 
 ### 筛选弹窗
 
@@ -125,5 +137,5 @@ cargo run --bin generate-pagination-test-parquet
 - 分页 offset 顺序跳过已读行，超大 offset 后续优化。
 - 筛选基于格式化后的 cell 文本。
 - 筛选后总数未知（状态栏显示 `?`），可按 `c` 手动统计。
-- Schema 视图暂不支持滚动 / 排序。
+- Schema 视图暂不支持排序（支持字段上下选择与自动滚动）。
 - 暂无列排序、导出。

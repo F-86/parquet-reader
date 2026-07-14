@@ -282,6 +282,7 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
             KeyCode::PageDown => app.cell_detail_scroll = app.cell_detail_scroll.saturating_add(8),
             KeyCode::Home => app.cell_detail_scroll = 0,
             KeyCode::Char('y') => copy_selected_cell(app),
+            KeyCode::Char('Y') => copy_selected_row(app),
             _ => {}
         }
         return;
@@ -311,6 +312,22 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
             KeyCode::Up => app.previous_filter_history(),
             KeyCode::Down => app.next_filter_history(),
             KeyCode::Char(ch) => app.insert_filter_char(ch),
+            _ => {}
+        }
+        return;
+    }
+
+    if app.view == ViewMode::Schema {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => app.should_quit = true,
+            KeyCode::Char('h') => app.show_help = true,
+            KeyCode::Char('s') => app.toggle_schema_view(),
+            KeyCode::Up | KeyCode::Char('k') => app.select_schema_row_previous(),
+            KeyCode::Down | KeyCode::Char('j') => app.select_schema_row_next(),
+            KeyCode::Char('K') => app.select_schema_row_top(),
+            KeyCode::Char('J') => app.select_schema_row_bottom(),
+            KeyCode::Char('y') => copy_selected_cell(app),
+            KeyCode::Char('Y') => copy_selected_row(app),
             _ => {}
         }
         return;
@@ -360,6 +377,7 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
         KeyCode::Char('p') | KeyCode::PageUp => load_previous_page(app),
         KeyCode::Enter | KeyCode::Char(' ') => app.open_cell_detail(),
         KeyCode::Char('y') => copy_selected_cell(app),
+        KeyCode::Char('Y') => copy_selected_row(app),
         _ => {}
     }
 }
@@ -387,6 +405,29 @@ fn copy_selected_cell(app: &mut AppState) {
     }
 }
 
+fn copy_selected_row(app: &mut AppState) {
+    let Some(value) = app.selected_row_detail_json() else {
+        app.status = "No row selected".to_string();
+        return;
+    };
+
+    let encoded = general_purpose::STANDARD.encode(value.as_bytes());
+    let sequence = format!("]52;c;{encoded}");
+    match io::stdout()
+        .write_all(sequence.as_bytes())
+        .and_then(|_| io::stdout().flush())
+    {
+        Ok(()) => {
+            app.status = format!(
+                "Copied row {} ({} fields) to clipboard",
+                app.selected_row + 1,
+                app.columns.len()
+            );
+        }
+        Err(error) => app.set_error(format!("failed to copy row: {error}")),
+    }
+}
+
 fn display_cell_detail_value(value: &str) -> String {
     let trimmed = value.trim();
     if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
@@ -399,6 +440,106 @@ fn display_cell_detail_value(value: &str) -> String {
         Ok(pretty) => pretty,
         Err(_) => value.to_string(),
     }
+}
+
+/// Render pretty-printed JSON with lightweight syntax highlighting.
+///
+/// Colors follow the plan: keys yellow, strings green, numbers cyan, null
+/// gray, booleans magenta. Non-JSON detail falls back to a single plain line.
+pub fn highlight_json_detail(raw: &str) -> Vec<Line<'static>> {
+    let trimmed = raw.trim();
+    let pretty = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .and_then(|json| serde_json::to_string_pretty(&json).ok())
+    } else {
+        None
+    };
+
+    let Some(text) = pretty.or_else(|| Some(raw.to_string())) else {
+        return Vec::new();
+    };
+
+    text.lines()
+        .map(|line| {
+            let (indent, rest) =
+                line.split_at(line.find(|c: char| !c.is_whitespace()).unwrap_or(0));
+            let mut rendered = Line::from(Span::raw(indent.to_string()));
+            rendered.spans.extend(highlight_line(rest));
+            rendered
+        })
+        .collect()
+}
+
+/// Highlight a single (already de-indented) JSON line into colored spans.
+fn highlight_line(line: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let key_style = Style::default().fg(Color::Yellow);
+    let string_style = Style::default().fg(Color::Green);
+    let number_style = Style::default().fg(Color::Cyan);
+    let null_style = Style::default().fg(Color::DarkGray);
+    let bool_style = Style::default().fg(Color::Magenta);
+
+    while index < bytes.len() {
+        let ch = bytes[index] as char;
+        if ch == '"' {
+            // Read a full string token, then check if it is a "key": prefix.
+            let Some(end) = line[index + 1..].find('"') else {
+                spans.push(Span::raw(line[index..].to_string()));
+                break;
+            };
+            let end = index + 1 + end;
+            let token = &line[index..=end];
+            let after = line[end + 1..].trim_start();
+            if after.starts_with(':') {
+                spans.push(Span::styled(token.to_string(), key_style));
+            } else {
+                spans.push(Span::styled(token.to_string(), string_style));
+            }
+            index = end + 1;
+            continue;
+        }
+        if ch.is_ascii_digit() || ch == '-' {
+            let end = line[index..]
+                .find(|c: char| {
+                    !(c.is_ascii_digit()
+                        || c == '.'
+                        || c == '-'
+                        || c == 'e'
+                        || c == 'E'
+                        || c == '+')
+                })
+                .unwrap_or(line.len() - index);
+            spans.push(Span::styled(
+                line[index..index + end].to_string(),
+                number_style,
+            ));
+            index += end;
+            continue;
+        }
+        if line[index..].starts_with("true") || line[index..].starts_with("false") {
+            let word = if line[index..].starts_with("true") {
+                "true"
+            } else {
+                "false"
+            };
+            spans.push(Span::styled(word.to_string(), bool_style));
+            index += word.len();
+            continue;
+        }
+        if line[index..].starts_with("null") {
+            spans.push(Span::styled("null".to_string(), null_style));
+            index += 4;
+            continue;
+        }
+        // Punctuation / whitespace: render plain and advance by a UTF-8 char.
+        let ch_len = line[index..].chars().next().map_or(1, |c| c.len_utf8());
+        spans.push(Span::raw(line[index..index + ch_len].to_string()));
+        index += ch_len;
+    }
+    spans
 }
 
 fn apply_filter(app: &mut AppState) {
@@ -673,8 +814,24 @@ fn draw_schema(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         ],
     )
     .header(header)
-    .block(Block::default().borders(Borders::ALL).title("Schema"));
-    frame.render_widget(table, area);
+    .block(Block::default().borders(Borders::ALL).title("Schema"))
+    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    // Keep the selected schema row visible: clamp scroll to a window around it.
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let selected = app.selected_schema_row;
+    let scroll = if visible_rows == 0 {
+        0
+    } else if selected < app.schema_scroll {
+        selected
+    } else if selected >= app.schema_scroll + visible_rows {
+        selected + 1 - visible_rows
+    } else {
+        app.schema_scroll
+    };
+    let mut state = TableState::default()
+        .with_selected(Some(app.selected_schema_row))
+        .with_offset(scroll);
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
 fn draw_table(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
@@ -830,6 +987,7 @@ fn draw_cell_detail(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     let popup = centered_rect(72, 62, area);
     let column = app.columns.get(app.selected_col);
     let value = display_cell_detail_value(app.selected_cell_value().unwrap_or(""));
+    let detail_lines = highlight_json_detail(&value);
     let title = column
         .map(|column| format!("Cell Detail: {}", column.name))
         .unwrap_or_else(|| "Cell Detail".to_string());
@@ -853,10 +1011,10 @@ fn draw_cell_detail(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         ]));
     }
     lines.push(Line::from(""));
-    lines.extend(value.lines().map(|line| Line::from(line.to_string())));
+    lines.extend(detail_lines);
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "j/k or mouse wheel: scroll  ·  y: copy cell  ·  Esc/Enter/Space: close",
+        "j/k or mouse wheel: scroll  ·  y: copy cell  ·  Y: copy row  ·  Esc/Enter/Space: close",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -993,6 +1151,17 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
         )]),
         Line::from("  j/k or ↑/↓        Move row selection"),
         Line::from("  J / K             Jump to page bottom / top"),
+        Line::from("  y / Y             Copy cell / row via OSC52"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Schema view",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  j/k or ↑/↓        Move selected field"),
+        Line::from("  J / K             Jump to first / last field"),
+        Line::from("  y / Y             Copy field cell / row via OSC52"),
         Line::from("  ← / l / →         Move selected column"),
         Line::from("  H / L             Jump to first / last column"),
         Line::from("  n / PageDown      Next page"),
@@ -1000,6 +1169,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("  Enter / Space     Open selected cell detail"),
         Line::from("  Double click      Open clicked cell detail"),
         Line::from("  y                 Copy selected cell via OSC52"),
+        Line::from("  Y                 Copy selected row (JSON) via OSC52"),
         Line::from("  mouse wheel ←/→   Move selected column"),
         Line::from(""),
         Line::from(vec![Span::styled(
@@ -1022,6 +1192,35 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn highlight_produces_colored_spans_without_panicking() {
+        let value = r#"{"name":"上海","count":42,"active":true,"note":null}"#;
+        let lines = highlight_json_detail(value);
+        // pretty JSON spans multiple lines; at least one line produced.
+        assert!(!lines.is_empty());
+        // The aggregate spans must reproduce the original value text.
+        let mut text = String::new();
+        for line in &lines {
+            for span in &line.spans {
+                text.push_str(&span.content);
+            }
+        }
+        assert!(text.contains("上海"));
+        assert!(text.contains("42"));
+        assert!(text.contains("null"));
+    }
+
+    #[test]
+    fn highlight_falls_back_for_plain_text() {
+        let lines = highlight_json_detail("just a plain string cell");
+        assert_eq!(lines.len(), 1);
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

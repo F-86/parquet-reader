@@ -34,6 +34,7 @@ pub struct FileTab {
     pub selected_row: usize,
     pub selected_col: usize,
     pub scroll_x: usize,
+    pub selected_schema_row: usize,
     pub filter: Option<String>,
 }
 
@@ -70,6 +71,8 @@ pub struct AppState {
     pub table_visible_column_count: usize,
     pub sidebar_width: u16,
     pub resizing_sidebar: bool,
+    pub selected_schema_row: usize,
+    pub schema_scroll: usize,
     pub show_help: bool,
     pub show_cell_detail: bool,
     pub cell_detail_scroll: u16,
@@ -108,6 +111,8 @@ impl AppState {
             table_visible_column_count: 1,
             sidebar_width: 30,
             resizing_sidebar: false,
+            selected_schema_row: 0,
+            schema_scroll: 0,
             show_help: false,
             show_cell_detail: false,
             cell_detail_scroll: 0,
@@ -148,6 +153,7 @@ impl AppState {
             selected_row: 0,
             selected_col: 0,
             scroll_x: 0,
+            selected_schema_row: 0,
             filter: None,
         };
         self.tabs.push(tab);
@@ -298,6 +304,7 @@ impl AppState {
         tab.selected_col = self.selected_col;
         tab.scroll_x = self.scroll_x;
         tab.filter = self.filter.clone();
+        tab.selected_schema_row = self.selected_schema_row;
     }
 
     fn restore_tab_state(&mut self, index: usize) {
@@ -315,6 +322,10 @@ impl AppState {
         self.selected_row = tab.selected_row.min(self.rows.len().saturating_sub(1));
         self.selected_col = tab.selected_col.min(self.columns.len().saturating_sub(1));
         self.scroll_x = tab.scroll_x.min(self.columns.len().saturating_sub(1));
+        self.selected_schema_row = tab
+            .selected_schema_row
+            .min(self.columns.len().saturating_sub(1));
+        self.schema_scroll = 0;
         self.show_cell_detail = false;
         self.cell_detail_scroll = 0;
     }
@@ -397,6 +408,24 @@ impl AppState {
     pub fn select_first_col(&mut self) {
         self.selected_col = 0;
         self.scroll_x = 0;
+    }
+
+    pub fn select_schema_row_next(&mut self) {
+        if self.selected_schema_row + 1 < self.columns.len() {
+            self.selected_schema_row += 1;
+        }
+    }
+
+    pub fn select_schema_row_previous(&mut self) {
+        self.selected_schema_row = self.selected_schema_row.saturating_sub(1);
+    }
+
+    pub fn select_schema_row_top(&mut self) {
+        self.selected_schema_row = 0;
+    }
+
+    pub fn select_schema_row_bottom(&mut self) {
+        self.selected_schema_row = self.columns.len().saturating_sub(1);
     }
 
     pub fn select_last_col(&mut self) {
@@ -672,6 +701,40 @@ impl AppState {
         self.filter.clone().unwrap_or_else(|| "-".to_string())
     }
 
+    /// Build a pretty JSON object for the selected row, keyed by column name,
+    /// using each cell's `detail` value. Used by the copy-row (`Y`) action.
+    pub fn selected_row_detail_json(&self) -> Option<String> {
+        let row = self.rows.get(self.selected_row)?;
+        let mut fields = Vec::new();
+        for column in &self.columns {
+            if let Some(cell) = row.cells.get(column.index) {
+                let value = cell.detail.trim();
+                let rendered = if value.starts_with('{') || value.starts_with('[') {
+                    serde_json::from_str::<serde_json::Value>(value)
+                        .ok()
+                        .and_then(|json| serde_json::to_string_pretty(&json).ok())
+                        .unwrap_or_else(|| cell.detail.clone())
+                } else {
+                    cell.detail.clone()
+                };
+                fields.push(format!(
+                    "  {}: {}",
+                    serde_json::to_string(&column.name).unwrap_or_default(),
+                    rendered
+                ));
+            }
+        }
+        Some(format!(
+            "{{
+{}
+}}",
+            fields.join(
+                ",
+"
+            )
+        ))
+    }
+
     pub fn selected_cell_value(&self) -> Option<&str> {
         self.rows
             .get(self.selected_row)
@@ -709,7 +772,10 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::cli::AppConfig;
-    use crate::data::{ColumnInfo, DataPage, RowView};
+    use crate::{
+        data::{ColumnInfo, DataPage, RowView},
+        formatting::CellView,
+    };
     use std::path::PathBuf;
 
     fn test_state() -> AppState {
@@ -826,6 +892,40 @@ mod tests {
         state.move_filter_cursor_right();
         assert_eq!(state.filter_cursor, 0);
         assert_eq!(state.filter_input, "");
+    }
+
+    #[test]
+    fn selected_row_detail_json_builds_object() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        set_columns(&mut state, &["id", "name"]);
+        state.rows = vec![RowView {
+            cells: vec![
+                CellView::new("7".to_string()),
+                CellView::new("\"alpha\"".to_string()),
+            ],
+        }];
+        state.selected_row = 0;
+        let json = state.selected_row_detail_json().unwrap();
+        assert!(json.starts_with('{'));
+        assert!(json.contains("\"id\""));
+        assert!(json.contains("\"name\""));
+        assert!(json.contains("alpha"));
+    }
+
+    #[test]
+    fn schema_row_selection_stays_in_bounds() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        set_columns(&mut state, &["a", "b", "c", "d", "e"]);
+        state.select_schema_row_bottom();
+        assert_eq!(state.selected_schema_row, 4);
+        state.select_schema_row_next();
+        assert_eq!(state.selected_schema_row, 4);
+        state.select_schema_row_top();
+        assert_eq!(state.selected_schema_row, 0);
+        state.select_schema_row_previous();
+        assert_eq!(state.selected_schema_row, 0);
     }
 
     // P1.3: single candidate completion

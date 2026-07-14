@@ -68,6 +68,7 @@ parquet/pagination.parquet
 | `Tab` / `Shift-Tab` | tab 切换；筛选弹窗内字段补全 / 反向补全 |
 | `↑` / `↓`（筛选弹窗内） | 切换筛选历史 |
 | `y` | OSC52 复制当前 cell |
+| `Y` | OSC52 复制当前整行 (JSON) |
 
 ## 鼠标
 
@@ -116,7 +117,7 @@ score > 80 and active = true
 - 分页基于 Parquet row group 跳转：直接定位包含目标 offset 的 row group，避免从头扫描丢弃已读行（仍顺序读取目标窗口内行）。
 - 筛选基于格式化后的 cell 文本，而非原始 Arrow 值。
 - 筛选后的总行数暂未知，状态栏显示 `?`（按 `c` 可手动 count）。
-- Schema 视图暂不支持滚动 / 排序。
+- Schema 视图暂不支持排序（支持上下选择字段并自动滚动）。
 - 暂无列排序、导出功能。
 
 ## 文档
