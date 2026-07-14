@@ -11,7 +11,7 @@ use parquet::{
 
 use crate::{
     error::{AppError, Result},
-    formatting::{CellView, format_cell},
+    formatting::{CellView, TypedValue, extract_typed_value, format_cell},
 };
 
 #[derive(Debug, Clone)]
@@ -198,13 +198,13 @@ impl ParquetFileDataSource {
         let mut reader = builder.with_batch_size(1024).build()?;
         let mut count = 0usize;
         while let Some(batch) = reader.next().transpose()? {
+            let columns = batch.columns();
             for row_index in 0..batch.num_rows() {
-                let cells = batch
-                    .columns()
+                let typed: Vec<TypedValue> = columns
                     .iter()
-                    .map(|array| format_cell(Arc::clone(array), row_index))
-                    .collect::<Vec<_>>();
-                if filter.matches(&cells) {
+                    .map(|array| extract_typed_value(array, row_index))
+                    .collect();
+                if filter.matches_typed(&typed) {
                     count += 1;
                 }
             }
@@ -238,17 +238,23 @@ fn append_batch_rows(
     limit: usize,
     filter: Option<&FilterAst>,
 ) {
+    let columns = batch.columns();
     for row_index in 0..batch.num_rows() {
         if rows.len() >= limit {
             break;
         }
-        let cells = batch
-            .columns()
+        let cells: Vec<CellView> = columns
             .iter()
             .map(|array| format_cell(Arc::clone(array), row_index))
-            .collect::<Vec<_>>();
-        if filter.is_some_and(|filter| !filter.matches(&cells)) {
-            continue;
+            .collect();
+        if let Some(filter) = filter {
+            let typed: Vec<TypedValue> = columns
+                .iter()
+                .map(|array| extract_typed_value(array, row_index))
+                .collect();
+            if !filter.matches_typed(&typed) {
+                continue;
+            }
         }
         if *skipped < offset {
             *skipped += 1;
@@ -277,32 +283,70 @@ struct FilterExpr {
 }
 
 impl FilterExpr {
-    fn matches(&self, cells: &[CellView]) -> bool {
-        let Some(cell) = cells.get(self.column_index) else {
+    fn matches_typed(&self, values: &[TypedValue]) -> bool {
+        let Some(value) = values.get(self.column_index) else {
             return false;
         };
-        let left = cell.detail.as_str();
         match self.op {
-            FilterOp::Eq => {
-                compare_string_or_number(left, &self.value, |ord| ord == std::cmp::Ordering::Equal)
-            }
-            FilterOp::NotEq => {
-                !compare_string_or_number(left, &self.value, |ord| ord == std::cmp::Ordering::Equal)
-            }
-            FilterOp::Gt => compare_string_or_number(left, &self.value, |ord| {
-                ord == std::cmp::Ordering::Greater
-            }),
-            FilterOp::Gte => compare_string_or_number(left, &self.value, |ord| {
+            FilterOp::Eq => self.compare_typed(value, |ord| ord == std::cmp::Ordering::Equal),
+            FilterOp::NotEq => !self.compare_typed(value, |ord| ord == std::cmp::Ordering::Equal),
+            FilterOp::Gt => self.compare_typed(value, |ord| ord == std::cmp::Ordering::Greater),
+            FilterOp::Gte => self.compare_typed(value, |ord| {
                 matches!(ord, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
             }),
-            FilterOp::Lt => {
-                compare_string_or_number(left, &self.value, |ord| ord == std::cmp::Ordering::Less)
-            }
-            FilterOp::Lte => compare_string_or_number(left, &self.value, |ord| {
+            FilterOp::Lt => self.compare_typed(value, |ord| ord == std::cmp::Ordering::Less),
+            FilterOp::Lte => self.compare_typed(value, |ord| {
                 matches!(ord, std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
             }),
-            FilterOp::Contains => left.to_lowercase().contains(&self.value.to_lowercase()),
+            FilterOp::Contains => self.contains_typed(value),
         }
+    }
+
+    /// Compare a typed cell value against the filter's string value.
+    ///
+    /// Numbers are compared numerically, booleans as booleans, and strings
+    /// fall back to numeric-then-lexical comparison for backward
+    /// compatibility.  Null cells never match comparison operators.
+    fn compare_typed(
+        &self,
+        cell: &TypedValue,
+        predicate: impl FnOnce(std::cmp::Ordering) -> bool,
+    ) -> bool {
+        match cell {
+            TypedValue::Null => false,
+            TypedValue::Boolean(b) => match self.value.to_lowercase().as_str() {
+                "true" => predicate(b.cmp(&true)),
+                "false" => predicate(b.cmp(&false)),
+                _ => false,
+            },
+            TypedValue::Number(n) => self
+                .value
+                .parse::<f64>()
+                .ok()
+                .and_then(|f| n.partial_cmp(&f))
+                .is_some_and(predicate),
+            TypedValue::Str(s) => match (s.parse::<f64>(), self.value.parse::<f64>()) {
+                (Ok(l), Ok(r)) => l.partial_cmp(&r).is_some_and(predicate),
+                _ => predicate(s.as_str().cmp(&self.value)),
+            },
+            TypedValue::Other(s) => match (s.parse::<f64>(), self.value.parse::<f64>()) {
+                (Ok(l), Ok(r)) => l.partial_cmp(&r).is_some_and(predicate),
+                _ => predicate(s.as_str().cmp(&self.value)),
+            },
+        }
+    }
+
+    /// `contains` is always string-based: the cell's textual representation
+    /// must contain the filter value (case-insensitive).
+    fn contains_typed(&self, cell: &TypedValue) -> bool {
+        let text = match cell {
+            TypedValue::Null => return false,
+            TypedValue::Boolean(b) => b.to_string(),
+            TypedValue::Number(n) => n.to_string(),
+            TypedValue::Str(s) => s.clone(),
+            TypedValue::Other(s) => s.clone(),
+        };
+        text.to_lowercase().contains(&self.value.to_lowercase())
     }
 }
 
@@ -315,23 +359,14 @@ enum FilterAst {
 }
 
 impl FilterAst {
-    fn matches(&self, cells: &[CellView]) -> bool {
+    fn matches_typed(&self, values: &[TypedValue]) -> bool {
         match self {
-            FilterAst::Predicate(predicate) => predicate.matches(cells),
-            FilterAst::And(left, right) => left.matches(cells) && right.matches(cells),
-            FilterAst::Or(left, right) => left.matches(cells) || right.matches(cells),
+            FilterAst::Predicate(predicate) => predicate.matches_typed(values),
+            FilterAst::And(left, right) => {
+                left.matches_typed(values) && right.matches_typed(values)
+            }
+            FilterAst::Or(left, right) => left.matches_typed(values) || right.matches_typed(values),
         }
-    }
-}
-
-fn compare_string_or_number(
-    left: &str,
-    right: &str,
-    predicate: impl FnOnce(std::cmp::Ordering) -> bool,
-) -> bool {
-    match (left.parse::<f64>(), right.parse::<f64>()) {
-        (Ok(left), Ok(right)) => left.partial_cmp(&right).is_some_and(predicate),
-        _ => predicate(left.cmp(right)),
     }
 }
 
@@ -512,10 +547,26 @@ mod tests {
         CellView::new(detail.to_string())
     }
 
+    fn typed_str(s: &str) -> TypedValue {
+        TypedValue::Str(s.to_string())
+    }
+
+    fn typed_num(n: f64) -> TypedValue {
+        TypedValue::Number(n)
+    }
+
+    fn typed_bool(b: bool) -> TypedValue {
+        TypedValue::Boolean(b)
+    }
+
     fn row(cells: &[&str]) -> RowView {
         RowView {
             cells: cells.iter().map(|value| cell(value)).collect(),
         }
+    }
+
+    fn typed_row(values: &[TypedValue]) -> Vec<TypedValue> {
+        values.to_vec()
     }
 
     #[test]
@@ -569,43 +620,108 @@ mod tests {
     fn matches_numeric_comparison() {
         let cols = columns(&["row_id", "score", "city", "note"]);
         let expr = parse_filter("score > 80", &cols).unwrap();
-        assert!(expr.matches(&row(&["", "98.5", "", ""]).cells));
-        assert!(!expr.matches(&row(&["", "80", "", ""]).cells));
-        assert!(!expr.matches(&row(&["", "50", "", ""]).cells));
+        assert!(expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(98.5),
+            typed_str(""),
+            typed_str("")
+        ])));
+        assert!(!expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(80.0),
+            typed_str(""),
+            typed_str("")
+        ])));
+        assert!(!expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(50.0),
+            typed_str(""),
+            typed_str("")
+        ])));
     }
 
     #[test]
     fn matches_contains_is_case_insensitive() {
         let cols = columns(&["row_id", "score", "city", "note"]);
         let expr = parse_filter("note contains TEST", &cols).unwrap();
-        assert!(expr.matches(&row(&["", "", "", "test row"]).cells));
-        assert!(!expr.matches(&row(&["", "", "", "other"]).cells));
+        assert!(expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(0.0),
+            typed_str(""),
+            typed_str("test row")
+        ])));
+        assert!(!expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(0.0),
+            typed_str(""),
+            typed_str("other")
+        ])));
     }
 
     #[test]
     fn matches_string_equality() {
         let cols = columns(&["row_id", "score", "city", "note"]);
         let expr = parse_filter("city = 上海", &cols).unwrap();
-        assert!(expr.matches(&row(&["", "", "上海", ""]).cells));
-        assert!(!expr.matches(&row(&["", "", "东京", ""]).cells));
+        assert!(expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(0.0),
+            typed_str("上海"),
+            typed_str("")
+        ])));
+        assert!(!expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(0.0),
+            typed_str("东京"),
+            typed_str("")
+        ])));
     }
 
     #[test]
     fn matches_and_combines_predicates() {
         let cols = columns(&["row_id", "score", "city", "active"]);
         let expr = parse_filter("score > 80 and active = true", &cols).unwrap();
-        assert!(expr.matches(&row(&["", "90", "", "true"]).cells));
-        assert!(!expr.matches(&row(&["", "90", "", "false"]).cells));
-        assert!(!expr.matches(&row(&["", "50", "", "true"]).cells));
+        assert!(expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(90.0),
+            typed_str(""),
+            typed_bool(true)
+        ])));
+        assert!(!expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(90.0),
+            typed_str(""),
+            typed_bool(false)
+        ])));
+        assert!(!expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(50.0),
+            typed_str(""),
+            typed_bool(true)
+        ])));
     }
 
     #[test]
     fn matches_or_combines_predicates() {
         let cols = columns(&["row_id", "score", "city", "active"]);
         let expr = parse_filter("city = 上海 or city = 東京", &cols).unwrap();
-        assert!(expr.matches(&row(&["", "", "上海", ""]).cells));
-        assert!(expr.matches(&row(&["", "", "東京", ""]).cells));
-        assert!(!expr.matches(&row(&["", "", "北京", ""]).cells));
+        assert!(expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(0.0),
+            typed_str("上海"),
+            typed_bool(false)
+        ])));
+        assert!(expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(0.0),
+            typed_str("東京"),
+            typed_bool(false)
+        ])));
+        assert!(!expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(0.0),
+            typed_str("北京"),
+            typed_bool(false)
+        ])));
     }
 
     #[test]
@@ -614,18 +730,43 @@ mod tests {
         // (score > 90 or score < 10) and active = true
         let expr = parse_filter("score > 90 or score < 10 and active = true", &cols).unwrap();
         // high score alone should match (it is on the or side, unconstrained)
-        assert!(expr.matches(&row(&["", "95", "", "false"]).cells));
+        assert!(expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(95.0),
+            typed_str(""),
+            typed_bool(false)
+        ])));
         // low score requires active = true
-        assert!(expr.matches(&row(&["", "5", "", "true"]).cells));
-        assert!(!expr.matches(&row(&["", "5", "", "false"]).cells));
+        assert!(expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(5.0),
+            typed_str(""),
+            typed_bool(true)
+        ])));
+        assert!(!expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(5.0),
+            typed_str(""),
+            typed_bool(false)
+        ])));
     }
 
     #[test]
     fn quoted_operator_text_is_not_split() {
         let cols = columns(&["row_id", "score", "city", "note"]);
         let expr = parse_filter("note contains \"A and B\"", &cols).unwrap();
-        assert!(expr.matches(&row(&["", "", "", "x A and B y"]).cells));
-        assert!(!expr.matches(&row(&["", "", "", "other"]).cells));
+        assert!(expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(0.0),
+            typed_str(""),
+            typed_str("x A and B y")
+        ])));
+        assert!(!expr.matches_typed(&typed_row(&[
+            typed_str(""),
+            typed_num(0.0),
+            typed_str(""),
+            typed_str("other")
+        ])));
     }
 
     #[test]
@@ -766,9 +907,47 @@ mod tests {
     fn matches_missing_cell_is_false() {
         let cols = columns(&["a", "b"]);
         let expr = parse_filter("a = x", &cols).unwrap();
-        let short = RowView {
-            cells: vec![cell("y")],
-        };
-        assert!(!expr.matches(&short.cells));
+        let short = vec![typed_str("y")];
+        assert!(!expr.matches_typed(&short));
+    }
+
+    #[test]
+    fn typed_boolean_equality() {
+        let cols = columns(&["active"]);
+        let expr = parse_filter("active = true", &cols).unwrap();
+        assert!(expr.matches_typed(&typed_row(&[typed_bool(true)])));
+        assert!(!expr.matches_typed(&typed_row(&[typed_bool(false)])));
+    }
+
+    #[test]
+    fn typed_null_never_matches_comparison() {
+        let cols = columns(&["score"]);
+        let expr = parse_filter("score > 50", &cols).unwrap();
+        assert!(!expr.matches_typed(&typed_row(&[TypedValue::Null])));
+    }
+
+    #[test]
+    fn typed_number_vs_non_numeric_value() {
+        let cols = columns(&["score"]);
+        let expr = parse_filter("score > abc", &cols).unwrap();
+        // Non-numeric filter value against a number column: no match.
+        assert!(!expr.matches_typed(&typed_row(&[typed_num(100.0)])));
+    }
+
+    #[test]
+    fn typed_string_not_equal_to_number() {
+        let cols = columns(&["name"]);
+        let expr = parse_filter("name = 42", &cols).unwrap();
+        // String column value "42" should still match numeric "42" via
+        // the string fallback path that tries numeric comparison.
+        assert!(expr.matches_typed(&typed_row(&[typed_str("42")])));
+    }
+
+    #[test]
+    fn typed_contains_on_number() {
+        let cols = columns(&["score"]);
+        let expr = parse_filter("score contains 9", &cols).unwrap();
+        assert!(expr.matches_typed(&typed_row(&[typed_num(98.5)])));
+        assert!(!expr.matches_typed(&typed_row(&[typed_num(50.0)])));
     }
 }

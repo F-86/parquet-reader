@@ -603,6 +603,153 @@ where
     array.as_primitive::<T>().value(row_index).to_string()
 }
 
+// ── Typed value extraction for filter comparison ──
+
+/// A typed value extracted from an Arrow array for structured comparison.
+///
+/// Used by the filter layer to compare cell values by their native type
+/// (number vs number, bool vs bool) rather than their formatted string.
+#[derive(Debug, Clone)]
+pub enum TypedValue {
+    Null,
+    Boolean(bool),
+    Number(f64),
+    Str(String),
+    /// Fallback for complex types (List, Struct, Map, Binary, …): the
+    /// formatted scalar string is used for comparison.
+    Other(String),
+}
+
+macro_rules! typed_dict {
+    ($array:expr, $row:expr, $kt:ty) => {{
+        let dict = $array.as_dictionary::<$kt>();
+        let raw = dict.keys().value($row) as i128;
+        let index = if raw < 0 { 0 } else { raw as usize };
+        let values = Arc::clone(dict.values());
+        extract_typed_value(&values, index)
+    }};
+}
+
+/// Extract a typed value from an Arrow array at `row_index` for filter
+/// comparison.  This is the typed counterpart of [`format_cell`]: instead
+/// of producing a display string it yields a value whose native Rust type
+/// can be compared directly.
+pub fn extract_typed_value(array: &ArrayRef, row_index: usize) -> TypedValue {
+    if array.is_null(row_index) {
+        return TypedValue::Null;
+    }
+    match array.data_type() {
+        DataType::Boolean => TypedValue::Boolean(array.as_boolean().value(row_index)),
+        DataType::Int8 => {
+            TypedValue::Number(array.as_primitive::<Int8Type>().value(row_index) as f64)
+        }
+        DataType::Int16 => {
+            TypedValue::Number(array.as_primitive::<Int16Type>().value(row_index) as f64)
+        }
+        DataType::Int32 => {
+            TypedValue::Number(array.as_primitive::<Int32Type>().value(row_index) as f64)
+        }
+        DataType::Int64 => {
+            TypedValue::Number(array.as_primitive::<Int64Type>().value(row_index) as f64)
+        }
+        DataType::UInt8 => {
+            TypedValue::Number(array.as_primitive::<UInt8Type>().value(row_index) as f64)
+        }
+        DataType::UInt16 => {
+            TypedValue::Number(array.as_primitive::<UInt16Type>().value(row_index) as f64)
+        }
+        DataType::UInt32 => {
+            TypedValue::Number(array.as_primitive::<UInt32Type>().value(row_index) as f64)
+        }
+        DataType::UInt64 => {
+            TypedValue::Number(array.as_primitive::<UInt64Type>().value(row_index) as f64)
+        }
+        DataType::Float32 => {
+            TypedValue::Number(array.as_primitive::<Float32Type>().value(row_index) as f64)
+        }
+        DataType::Float64 => {
+            TypedValue::Number(array.as_primitive::<Float64Type>().value(row_index) as f64)
+        }
+        DataType::Date32 => {
+            TypedValue::Number(array.as_primitive::<Date32Type>().value(row_index) as f64)
+        }
+        DataType::Date64 => {
+            TypedValue::Number(array.as_primitive::<Date64Type>().value(row_index) as f64)
+        }
+        DataType::Time32(unit) => match unit {
+            TimeUnit::Second => {
+                TypedValue::Number(array.as_primitive::<Time32SecondType>().value(row_index) as f64)
+            }
+            TimeUnit::Millisecond => TypedValue::Number(
+                array
+                    .as_primitive::<Time32MillisecondType>()
+                    .value(row_index) as f64,
+            ),
+            _ => TypedValue::Other(format_scalar(Arc::clone(array), row_index)),
+        },
+        DataType::Time64(unit) => match unit {
+            TimeUnit::Microsecond => TypedValue::Number(
+                array
+                    .as_primitive::<Time64MicrosecondType>()
+                    .value(row_index) as f64,
+            ),
+            TimeUnit::Nanosecond => TypedValue::Number(
+                array
+                    .as_primitive::<Time64NanosecondType>()
+                    .value(row_index) as f64,
+            ),
+            _ => TypedValue::Other(format_scalar(Arc::clone(array), row_index)),
+        },
+        DataType::Timestamp(unit, _) => {
+            TypedValue::Number(timestamp_value(array, row_index, unit) as f64)
+        }
+        DataType::Duration(unit) => {
+            TypedValue::Number(duration_value(array, row_index, unit) as f64)
+        }
+        DataType::Decimal128(_, scale) => {
+            let raw = array.as_primitive::<Decimal128Type>().value(row_index);
+            TypedValue::Number(decimal128_to_f64(raw, *scale as usize))
+        }
+        DataType::Decimal256(_, scale) => {
+            let raw = array.as_primitive::<Decimal256Type>().value(row_index);
+            TypedValue::Number(decimal256_to_f64(raw, *scale as usize))
+        }
+        DataType::Utf8 => TypedValue::Str(array.as_string::<i32>().value(row_index).to_string()),
+        DataType::LargeUtf8 => {
+            TypedValue::Str(array.as_string::<i64>().value(row_index).to_string())
+        }
+        DataType::Dictionary(key_type, _) => match key_type.as_ref() {
+            DataType::Int8 => typed_dict!(array, row_index, Int8Type),
+            DataType::Int16 => typed_dict!(array, row_index, Int16Type),
+            DataType::Int32 => typed_dict!(array, row_index, Int32Type),
+            DataType::Int64 => typed_dict!(array, row_index, Int64Type),
+            DataType::UInt8 => typed_dict!(array, row_index, UInt8Type),
+            DataType::UInt16 => typed_dict!(array, row_index, UInt16Type),
+            DataType::UInt32 => typed_dict!(array, row_index, UInt32Type),
+            DataType::UInt64 => typed_dict!(array, row_index, UInt64Type),
+            _ => TypedValue::Other(format_scalar(Arc::clone(array), row_index)),
+        },
+        _ => TypedValue::Other(format_scalar(Arc::clone(array), row_index)),
+    }
+}
+
+fn decimal128_to_f64(value: i128, scale: usize) -> f64 {
+    if scale == 0 {
+        value as f64
+    } else {
+        value as f64 / 10f64.powi(scale as i32)
+    }
+}
+
+fn decimal256_to_f64(value: i256, scale: usize) -> f64 {
+    let value_f64 = value.to_string().parse::<f64>().unwrap_or(0.0);
+    if scale == 0 {
+        value_f64
+    } else {
+        value_f64 / 10f64.powi(scale as i32)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
