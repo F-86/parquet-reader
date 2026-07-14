@@ -345,6 +345,7 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
         KeyCode::Char('s') => app.toggle_schema_view(),
         KeyCode::Char('/') => app.open_filter_popup(),
         KeyCode::Char('r') => reset_filter(app),
+        KeyCode::Char('c') => app.count_current_filter(),
         KeyCode::Up | KeyCode::Char('k') => app.select_row_previous(),
         KeyCode::Down | KeyCode::Char('j') => app.select_row_next(),
         KeyCode::Char('K') => app.select_row_top(),
@@ -927,6 +928,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("  /                 Open filter popup"),
         Line::from("  Tab in filter     Complete/cycle column name"),
         Line::from("  r                 Reset filter"),
+        Line::from("  c                 Count rows for current filter"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "File sidebar",

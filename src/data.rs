@@ -134,6 +134,60 @@ impl ParquetFileDataSource {
         })
     }
 
+    /// Count rows matching the optional filter.
+    ///
+    /// Without a filter this is the metadata `num_rows` (cheap). With a filter
+    /// every row is scanned and matched against the formatted cell values, so
+    /// it can be expensive for large files; callers should surface this as an
+    /// on-demand action rather than on every page load.
+    pub fn count_with_filter(&self, filter: Option<&str>) -> Result<usize> {
+        let file = File::open(&self.path).map_err(|source| AppError::FileMetadata {
+            path: self.path.clone(),
+            source,
+        })?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|source| {
+            AppError::OpenParquet {
+                path: self.path.clone(),
+                source,
+            }
+        })?;
+        let schema = builder.schema();
+        let columns = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| ColumnInfo {
+                index,
+                name: field.name().clone(),
+                logical_type: field.data_type().to_string(),
+                physical_type: None,
+            })
+            .collect::<Vec<_>>();
+
+        let Some(filter) = filter
+            .map(|expr| parse_filter(expr, &columns))
+            .transpose()?
+        else {
+            return Ok(builder.metadata().file_metadata().num_rows().max(0) as usize);
+        };
+
+        let mut reader = builder.with_batch_size(1024).build()?;
+        let mut count = 0usize;
+        while let Some(batch) = reader.next().transpose()? {
+            for row_index in 0..batch.num_rows() {
+                let cells = batch
+                    .columns()
+                    .iter()
+                    .map(|array| format_cell(Arc::clone(array), row_index))
+                    .collect::<Vec<_>>();
+                if filter.matches(&cells) {
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
+
     #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
@@ -810,6 +864,40 @@ mod tests {
         let expr = parse_filter("note contains \"A and B\"", &cols).unwrap();
         assert!(expr.matches(&row(&["", "", "", "x A and B y"]).cells));
         assert!(!expr.matches(&row(&["", "", "", "other"]).cells));
+    }
+
+    #[test]
+    fn count_with_filter_counts_matching_rows() {
+        use arrow_array::{Int32Array, RecordBatch, StringArray};
+        use arrow_schema::{DataType, Field, Schema};
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("score", DataType::Int32, false),
+            Field::new("city", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![90, 40, 85, 10])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "c"])),
+            ],
+        )
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("count.parquet");
+        let file = File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let source = ParquetFileDataSource::new(path);
+        assert_eq!(source.count_with_filter(None).unwrap(), 4);
+        assert_eq!(source.count_with_filter(Some("score > 80")).unwrap(), 2);
+        assert_eq!(source.count_with_filter(Some("city = a")).unwrap(), 2);
+        assert_eq!(source.count_with_filter(Some("score > 999")).unwrap(), 0);
     }
 
     #[test]

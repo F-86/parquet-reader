@@ -512,6 +512,23 @@ impl AppState {
         self.filter_cursor = self.filter_input.len();
     }
 
+    /// Count rows matching the active filter by scanning the file. The result
+    /// is shown in the status bar; failures are surfaced as actionable errors.
+    pub fn count_current_filter(&mut self) {
+        let Some(path) = self.current_file_path() else {
+            self.status = "No file opened".to_string();
+            return;
+        };
+        let data_source = crate::data::ParquetFileDataSource::new(path);
+        match data_source.count_with_filter(self.filter.as_deref()) {
+            Ok(count) => {
+                let filter = self.filter_display();
+                self.status = format!("Count for filter '{filter}': {count} rows");
+            }
+            Err(error) => self.set_error(error.to_string()),
+        }
+    }
+
     pub fn reset_filter(&mut self) {
         self.filter = None;
         self.offset = 0;
