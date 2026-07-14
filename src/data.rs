@@ -595,3 +595,113 @@ where
 {
     array.as_primitive::<T>().value(row_index).to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn columns(names: &[&str]) -> Vec<ColumnInfo> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| ColumnInfo {
+                index,
+                name: name.to_string(),
+                logical_type: "Utf8".to_string(),
+                physical_type: None,
+            })
+            .collect()
+    }
+
+    fn cell(detail: &str) -> CellView {
+        CellView::new(detail.to_string())
+    }
+
+    fn row(cells: &[&str]) -> RowView {
+        RowView {
+            cells: cells.iter().map(|value| cell(value)).collect(),
+        }
+    }
+
+    #[test]
+    fn split_basic_expression() {
+        let (column, op, value) = split_filter("score > 80").unwrap();
+        assert_eq!(column, "score");
+        assert_eq!(value, "80");
+        assert!(matches!(op, FilterOp::Gt));
+    }
+
+    #[test]
+    fn split_recognizes_all_operators() {
+        assert!(matches!(split_filter("a = 1").unwrap().1, FilterOp::Eq));
+        assert!(matches!(split_filter("a != 1").unwrap().1, FilterOp::NotEq));
+        assert!(matches!(split_filter("a > 1").unwrap().1, FilterOp::Gt));
+        assert!(matches!(split_filter("a >= 1").unwrap().1, FilterOp::Gte));
+        assert!(matches!(split_filter("a < 1").unwrap().1, FilterOp::Lt));
+        assert!(matches!(split_filter("a <= 1").unwrap().1, FilterOp::Lte));
+        assert!(matches!(
+            split_filter("a contains x").unwrap().1,
+            FilterOp::Contains
+        ));
+    }
+
+    #[test]
+    fn split_requires_column_and_value() {
+        assert!(split_filter("score >").is_err());
+        assert!(split_filter("score").is_err());
+        assert!(split_filter("= 1").is_err());
+        assert!(split_filter("").is_err());
+    }
+
+    #[test]
+    fn unquote_strips_surrounding_quotes() {
+        assert_eq!(unquote_filter_value("\"上海\""), "上海");
+        assert_eq!(unquote_filter_value("'东京'"), "东京");
+        assert_eq!(unquote_filter_value("上海"), "上海");
+        assert_eq!(unquote_filter_value("ab"), "ab");
+    }
+
+    #[test]
+    fn parse_unknown_column_errors() {
+        let cols = columns(&["city", "score"]);
+        assert!(parse_filter("score > 80", &cols).is_ok());
+        assert!(parse_filter("missing > 80", &cols).is_err());
+        assert!(parse_filter("score", &cols).is_err());
+        assert!(parse_filter("score >", &cols).is_err());
+    }
+
+    #[test]
+    fn matches_numeric_comparison() {
+        let cols = columns(&["row_id", "score", "city", "note"]);
+        let expr = parse_filter("score > 80", &cols).unwrap();
+        assert!(expr.matches(&row(&["", "98.5", "", ""]).cells));
+        assert!(!expr.matches(&row(&["", "80", "", ""]).cells));
+        assert!(!expr.matches(&row(&["", "50", "", ""]).cells));
+    }
+
+    #[test]
+    fn matches_contains_is_case_insensitive() {
+        let cols = columns(&["row_id", "score", "city", "note"]);
+        let expr = parse_filter("note contains TEST", &cols).unwrap();
+        assert!(expr.matches(&row(&["", "", "", "test row"]).cells));
+        assert!(!expr.matches(&row(&["", "", "", "other"]).cells));
+    }
+
+    #[test]
+    fn matches_string_equality() {
+        let cols = columns(&["row_id", "score", "city", "note"]);
+        let expr = parse_filter("city = 上海", &cols).unwrap();
+        assert!(expr.matches(&row(&["", "", "上海", ""]).cells));
+        assert!(!expr.matches(&row(&["", "", "东京", ""]).cells));
+    }
+
+    #[test]
+    fn matches_missing_cell_is_false() {
+        let cols = columns(&["a", "b"]);
+        let expr = parse_filter("a = x", &cols).unwrap();
+        let short = RowView {
+            cells: vec![cell("y")],
+        };
+        assert!(!expr.matches(&short.cells));
+    }
+}

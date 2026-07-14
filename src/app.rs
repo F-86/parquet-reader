@@ -62,6 +62,8 @@ pub struct AppState {
     pub filter: Option<String>,
     pub filter_input: String,
     pub filter_cursor: usize,
+    pub filter_completion_candidates: Vec<String>,
+    pub filter_completion_index: usize,
     pub show_filter_popup: bool,
     pub table_visible_column_count: usize,
     pub sidebar_width: u16,
@@ -96,6 +98,8 @@ impl AppState {
             filter: None,
             filter_input: String::new(),
             filter_cursor: 0,
+            filter_completion_candidates: Vec::new(),
+            filter_completion_index: 0,
             show_filter_popup: false,
             table_visible_column_count: 1,
             sidebar_width: 30,
@@ -430,6 +434,8 @@ impl AppState {
         }
         self.filter_input = self.filter.clone().unwrap_or_default();
         self.filter_cursor = self.filter_input.len();
+        self.filter_completion_candidates.clear();
+        self.filter_completion_index = 0;
         self.show_filter_popup = true;
     }
 
@@ -437,6 +443,8 @@ impl AppState {
         self.show_filter_popup = false;
         self.filter_input.clear();
         self.filter_cursor = 0;
+        self.filter_completion_candidates.clear();
+        self.filter_completion_index = 0;
     }
 
     pub fn set_filter_from_input(&mut self) -> Option<String> {
@@ -451,6 +459,8 @@ impl AppState {
         self.show_filter_popup = false;
         self.filter_input.clear();
         self.filter_cursor = 0;
+        self.filter_completion_candidates.clear();
+        self.filter_completion_index = 0;
         self.filter.clone()
     }
 
@@ -461,6 +471,8 @@ impl AppState {
         self.show_filter_popup = false;
         self.filter_input.clear();
         self.filter_cursor = 0;
+        self.filter_completion_candidates.clear();
+        self.filter_completion_index = 0;
     }
 
     pub fn insert_filter_char(&mut self, ch: char) {
@@ -537,36 +549,47 @@ impl AppState {
             .find(char::is_whitespace)
             .map_or(self.filter_input.len(), |index| self.filter_cursor + index);
         let prefix = &self.filter_input[token_start..self.filter_cursor];
+        let current_token = &self.filter_input[token_start..token_end];
 
-        let mut matches = self
-            .columns
-            .iter()
-            .filter(|column| column.name.starts_with(prefix))
-            .map(|column| column.name.clone())
-            .collect::<Vec<_>>();
+        let continued = !self.filter_completion_candidates.is_empty()
+            && self
+                .filter_completion_candidates
+                .get(self.filter_completion_index)
+                .is_some_and(|name| name == current_token);
+
+        let matches = if continued {
+            self.filter_completion_candidates.clone()
+        } else {
+            let mut generated = self
+                .columns
+                .iter()
+                .filter(|column| column.name.starts_with(prefix))
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            generated.sort();
+            self.filter_completion_candidates = generated.clone();
+            generated
+        };
 
         if matches.is_empty() {
             self.status = format!("No column matches '{prefix}'");
             return;
         }
-        matches.sort();
 
-        let current_token = &self.filter_input[token_start..token_end];
-        let selected = matches
-            .iter()
-            .position(|name| name == current_token)
-            .map(|index| {
-                if reverse {
-                    if index == 0 {
-                        matches.len() - 1
-                    } else {
-                        index - 1
-                    }
-                } else {
-                    (index + 1) % matches.len()
-                }
-            })
-            .unwrap_or(0);
+        let selected = if continued {
+            let len = matches.len();
+            if reverse {
+                (self.filter_completion_index + len - 1) % len
+            } else {
+                (self.filter_completion_index + 1) % len
+            }
+        } else {
+            matches
+                .iter()
+                .position(|name| name == current_token)
+                .unwrap_or(0)
+        };
+        self.filter_completion_index = selected;
         let replacement = &matches[selected];
         self.filter_input
             .replace_range(token_start..token_end, replacement);
@@ -613,5 +636,261 @@ impl AppState {
 
     pub fn active_file_path(&self) -> Option<&Path> {
         self.active_file.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::AppConfig;
+    use crate::data::{ColumnInfo, DataPage, RowView};
+    use std::path::PathBuf;
+
+    fn test_state() -> AppState {
+        let config = AppConfig {
+            initial_file_path: None,
+            page_size: 50,
+            root_directory: std::env::temp_dir(),
+        };
+        AppState::new(config).unwrap()
+    }
+
+    fn set_columns(state: &mut AppState, names: &[&str]) {
+        state.columns = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| ColumnInfo {
+                index,
+                name: name.to_string(),
+                logical_type: "Utf8".to_string(),
+                physical_type: None,
+            })
+            .collect();
+    }
+
+    fn single_row() -> RowView {
+        RowView { cells: Vec::new() }
+    }
+
+    // P1.2: insert at cursor position
+    #[test]
+    fn insert_at_cursor_splits_token() {
+        let mut state = test_state();
+        state.filter_input = "city  上海".to_string();
+        state.filter_cursor = 5;
+        state.insert_filter_char('=');
+        assert_eq!(state.filter_input, "city = 上海");
+        assert_eq!(state.filter_cursor, 6);
+    }
+
+    // P1.2: backspace removes char before cursor without breaking UTF-8
+    #[test]
+    fn backspace_removes_previous_char() {
+        let mut state = test_state();
+        state.filter_input = "city = 上海".to_string();
+        state.filter_cursor = state.filter_input.len();
+        state.backspace_filter_char();
+        assert_eq!(state.filter_input, "city = 上");
+        assert_eq!(state.filter_cursor, 10);
+    }
+
+    // P1.2: delete removes char at cursor
+    #[test]
+    fn delete_removes_current_char() {
+        let mut state = test_state();
+        state.filter_input = "city = 上海".to_string();
+        state.filter_cursor = 7;
+        state.delete_filter_char();
+        assert_eq!(state.filter_input, "city = 海");
+        assert_eq!(state.filter_cursor, 7);
+    }
+
+    // P1.2: left cursor moves on UTF-8 boundaries, never panics
+    #[test]
+    fn left_cursor_stays_on_char_boundary() {
+        let mut state = test_state();
+        state.filter_input = "a你b".to_string();
+        state.filter_cursor = state.filter_input.len();
+        state.move_filter_cursor_left();
+        assert_eq!(state.filter_cursor, 4);
+        state.move_filter_cursor_left();
+        assert_eq!(state.filter_cursor, 1);
+        state.move_filter_cursor_left();
+        assert_eq!(state.filter_cursor, 0);
+        state.move_filter_cursor_left();
+        assert_eq!(state.filter_cursor, 0);
+    }
+
+    // P1.2: right cursor moves on UTF-8 boundaries
+    #[test]
+    fn right_cursor_stays_on_char_boundary() {
+        let mut state = test_state();
+        state.filter_input = "a你b".to_string();
+        state.filter_cursor = 0;
+        state.move_filter_cursor_right();
+        assert_eq!(state.filter_cursor, 1);
+        state.move_filter_cursor_right();
+        assert_eq!(state.filter_cursor, 4);
+        state.move_filter_cursor_right();
+        assert_eq!(state.filter_cursor, 5);
+        state.move_filter_cursor_right();
+        assert_eq!(state.filter_cursor, 5);
+    }
+
+    // P1.2: home/end
+    #[test]
+    fn home_and_end_move_to_boundaries() {
+        let mut state = test_state();
+        state.filter_input = "score > 80".to_string();
+        state.move_filter_cursor_home();
+        assert_eq!(state.filter_cursor, 0);
+        state.move_filter_cursor_end();
+        assert_eq!(state.filter_cursor, 10);
+    }
+
+    // P1.2: empty input does not panic
+    #[test]
+    fn empty_input_edits_are_safe() {
+        let mut state = test_state();
+        state.filter_input = String::new();
+        state.filter_cursor = 0;
+        state.backspace_filter_char();
+        state.delete_filter_char();
+        state.move_filter_cursor_left();
+        state.move_filter_cursor_right();
+        assert_eq!(state.filter_cursor, 0);
+        assert_eq!(state.filter_input, "");
+    }
+
+    // P1.3: single candidate completion
+    #[test]
+    fn completes_single_candidate() {
+        let mut state = test_state();
+        set_columns(&mut state, &["city", "score", "status"]);
+        state.filter_input = "ci".to_string();
+        state.filter_cursor = 2;
+        state.complete_filter_field(false);
+        assert_eq!(state.filter_input, "city");
+        assert_eq!(state.filter_cursor, 4);
+    }
+
+    // P1.3: cycling through multiple candidates and reverse
+    #[test]
+    fn cycles_through_multiple_candidates() {
+        let mut state = test_state();
+        set_columns(&mut state, &["score", "status"]);
+        state.filter_input = "s".to_string();
+        state.filter_cursor = 1;
+        state.complete_filter_field(false);
+        assert_eq!(state.filter_input, "score");
+        state.complete_filter_field(false);
+        assert_eq!(state.filter_input, "status");
+        state.complete_filter_field(false);
+        assert_eq!(state.filter_input, "score");
+        state.filter_input = "score".to_string();
+        state.filter_cursor = 5;
+        state.complete_filter_field(true);
+        assert_eq!(state.filter_input, "status");
+    }
+
+    // P1.3: only the current token is replaced
+    #[test]
+    fn completes_only_current_token() {
+        let mut state = test_state();
+        set_columns(&mut state, &["city", "score", "status"]);
+        state.filter_input = "city = s".to_string();
+        state.filter_cursor = 8;
+        state.complete_filter_field(false);
+        assert_eq!(state.filter_input, "city = score");
+    }
+
+    // P1.3: no-match keeps input and reports status
+    #[test]
+    fn no_match_keeps_input() {
+        let mut state = test_state();
+        set_columns(&mut state, &["city"]);
+        state.filter_input = "zzz".to_string();
+        state.filter_cursor = 3;
+        state.complete_filter_field(false);
+        assert_eq!(state.filter_input, "zzz");
+        assert!(state.status.contains("zzz"));
+    }
+
+    // P1.4: filter conditions are isolated per tab
+    #[test]
+    fn filters_are_isolated_per_tab() {
+        let mut state = test_state();
+        set_columns(&mut state, &["row_id", "score", "city"]);
+        let file_a = PathBuf::from("a.parquet");
+        let file_b = PathBuf::from("b.parquet");
+        let page_a = DataPage {
+            columns: state.columns.clone(),
+            rows: vec![single_row()],
+            offset: 0,
+            total_rows: Some(10),
+        };
+        let page_b = DataPage {
+            columns: state.columns.clone(),
+            rows: vec![single_row()],
+            offset: 0,
+            total_rows: Some(10),
+        };
+        state.apply_page(file_a.clone(), page_a);
+        state.filter = Some("score > 80".to_string());
+        state.switch_to_tab(0);
+        state.apply_page(file_b.clone(), page_b);
+        state.filter = Some("city = 上海".to_string());
+        state.switch_to_tab(1);
+        state.switch_to_tab(0);
+        assert_eq!(state.filter, Some("score > 80".to_string()));
+        state.switch_to_tab(1);
+        assert_eq!(state.filter, Some("city = 上海".to_string()));
+    }
+
+    // P1.5: pagination boundaries
+    #[test]
+    fn pagination_boundaries() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        state.rows = vec![single_row()];
+        state.offset = 0;
+        state.page_size = 50;
+        state.total_rows = Some(120);
+        assert_eq!(state.previous_page_offset(), None);
+        assert_eq!(state.next_page_offset(), Some(50));
+
+        state.offset = 100;
+        assert_eq!(state.next_page_offset(), None);
+
+        state.total_rows = None;
+        state.offset = 0;
+        assert_eq!(state.next_page_offset(), Some(50));
+
+        state.rows = Vec::new();
+        assert_eq!(state.next_page_offset(), None);
+    }
+
+    // P1.6: schema/data toggle preserves app state
+    #[test]
+    fn schema_toggle_preserves_state() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        set_columns(&mut state, &["a", "b", "c", "d"]);
+        state.rows = vec![single_row(); 5];
+        state.offset = 50;
+        state.selected_row = 3;
+        state.selected_col = 2;
+        state.filter = Some("score > 80".to_string());
+
+        state.toggle_schema_view();
+        assert_eq!(state.view, ViewMode::Schema);
+        state.toggle_schema_view();
+        assert_eq!(state.view, ViewMode::Data);
+        assert_eq!(state.offset, 50);
+        assert_eq!(state.selected_row, 3);
+        assert_eq!(state.selected_col, 2);
+        assert_eq!(state.filter, Some("score > 80".to_string()));
+        assert_eq!(state.columns.len(), 4);
+        assert_eq!(state.rows.len(), 5);
     }
 }

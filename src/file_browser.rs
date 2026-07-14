@@ -179,3 +179,54 @@ fn kind_order(kind: FileEntryKind) -> u8 {
         FileEntryKind::OtherFile => 2,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_dir(path: &Path, name: &str) -> PathBuf {
+        let dir = path.join(name);
+        fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn cannot_navigate_outside_root() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_path_buf();
+        let sub = make_dir(&root_path, "sub");
+        make_dir(&sub, "nested");
+
+        let mut sidebar = FileSidebar::new(root_path.clone()).unwrap();
+        assert!(sidebar.toggle_directory(&sub).is_ok());
+
+        let outside = root_path
+            .parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| root_path.clone());
+        assert!(sidebar.toggle_directory(&outside).is_err());
+
+        let sibling = root_path.join("..");
+        assert!(sidebar.toggle_directory(&sibling).is_err());
+
+        let absolute = std::env::temp_dir().join("definitely_outside_root");
+        assert!(sidebar.toggle_directory(&absolute).is_err());
+    }
+
+    #[test]
+    fn toggling_directories_builds_visible_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_path_buf();
+        let sub = make_dir(&root_path, "sub");
+        make_dir(&sub, "nested");
+
+        let mut sidebar = FileSidebar::new(root_path.clone()).unwrap();
+        assert_eq!(sidebar.entries.len(), 1);
+
+        sidebar.toggle_directory(&sub).unwrap();
+        assert_eq!(sidebar.entries.len(), 2);
+
+        sidebar.toggle_directory(&sub).unwrap();
+        assert_eq!(sidebar.entries.len(), 1);
+    }
+}
