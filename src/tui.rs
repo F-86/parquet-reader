@@ -720,12 +720,41 @@ fn draw_table(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
 
 fn draw_status(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     let status = truncate_to_width(&app.status_text(), area.width as usize);
-    let style = if app.error.is_some() {
-        Style::default().fg(Color::Red)
-    } else {
-        Style::default().fg(Color::White).bg(Color::DarkGray)
+    if app.error.is_some() {
+        frame.render_widget(
+            Paragraph::new(status).style(Style::default().fg(Color::Red)),
+            area,
+        );
+        return;
+    }
+
+    let base_style = Style::default().fg(Color::White).bg(Color::DarkGray);
+    let filter_style = Style::default()
+        .fg(Color::Green)
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD);
+
+    let Some(filter) = app.filter.as_deref() else {
+        frame.render_widget(Paragraph::new(status).style(base_style), area);
+        return;
     };
-    frame.render_widget(Paragraph::new(status).style(style), area);
+
+    let filter_segment = format!("filter {filter}");
+    if let Some(index) = status.find(&filter_segment) {
+        let before = &status[..index];
+        let after_start = index + filter_segment.len();
+        let after = status.get(after_start..).unwrap_or_default();
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(before.to_string(), base_style),
+                Span::styled(filter_segment, filter_style),
+                Span::styled(after.to_string(), base_style),
+            ])),
+            area,
+        );
+    } else {
+        frame.render_widget(Paragraph::new(status).style(base_style), area);
+    }
 }
 
 fn draw_cell_detail(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
