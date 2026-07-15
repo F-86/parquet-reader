@@ -13,6 +13,10 @@ pub struct CliArgs {
     /// Number of rows to read for the first page.
     #[arg(long, default_value_t = 50)]
     pub page_size: usize,
+
+    /// Directory for CSV page exports. Defaults to system temp dir.
+    #[arg(long)]
+    pub export_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -20,6 +24,7 @@ pub struct AppConfig {
     pub initial_file_path: Option<PathBuf>,
     pub page_size: usize,
     pub root_directory: PathBuf,
+    pub export_dir: PathBuf,
 }
 
 impl CliArgs {
@@ -34,6 +39,7 @@ impl CliArgs {
             initial_file_path,
             page_size: self.page_size.max(1),
             root_directory,
+            export_dir: self.export_dir.unwrap_or_else(std::env::temp_dir),
         })
     }
 }

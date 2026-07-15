@@ -70,6 +70,7 @@ pub struct AppState {
     pub active_file: Option<PathBuf>,
     pub view: ViewMode,
     pub page_size: usize,
+    pub export_dir: PathBuf,
     pub columns: Vec<ColumnInfo>,
     pub rows: Vec<RowView>,
     pub offset: usize,
@@ -130,6 +131,7 @@ impl AppState {
             active_file: config.initial_file_path,
             view: ViewMode::Empty,
             page_size: config.page_size,
+            export_dir: config.export_dir,
             columns: Vec::new(),
             rows: Vec::new(),
             offset: 0,
@@ -806,10 +808,10 @@ impl AppState {
         self.filter_cursor = self.filter_input.len();
     }
 
-    /// Write the current page (header + rows) to a CSV file under the system
-    /// temp directory and report the path in the status bar. Failures surface
-    /// as actionable errors. Only the currently loaded page is exported, since
-    /// data is read on demand, page by page.
+    /// Write the current page (header + rows) to a CSV file under the
+    /// configured export directory and report the path in the status bar.
+    /// Failures surface as actionable errors. Only the currently loaded page
+    /// is exported, since data is read on demand, page by page.
     pub fn export_current_page_csv(&mut self) {
         if self.active_file.is_none() || self.rows.is_empty() {
             self.status = "No rows to export".to_string();
@@ -821,7 +823,7 @@ impl AppState {
             .and_then(|path| path.file_stem())
             .and_then(|stem| stem.to_str())
             .unwrap_or("export");
-        let path = std::env::temp_dir().join(format!("{stem}.page.csv"));
+        let path = self.export_dir.join(format!("{stem}.page.csv"));
 
         let mut writer = match std::fs::File::create(&path) {
             Ok(writer) => writer,
@@ -1472,6 +1474,7 @@ mod tests {
             initial_file_path: None,
             page_size: 50,
             root_directory: std::env::temp_dir(),
+            export_dir: std::env::temp_dir(),
         };
         AppState::new(config).unwrap()
     }
@@ -1663,12 +1666,33 @@ mod tests {
         ];
         state.offset = 0;
         state.export_current_page_csv();
-        let path = std::env::temp_dir().join("people.page.csv");
+        let path = state.export_dir.join("people.page.csv");
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.starts_with("#,id,name"));
         assert!(content.contains("1,a"));
         assert!(content.contains("2,\"b,c\""));
         let _ = std::fs::remove_file(&path);
+    }
+
+    // E1: export respects custom export_dir
+    #[test]
+    fn export_uses_custom_export_dir() {
+        let mut state = test_state();
+        let custom_dir = std::env::temp_dir().join("parquet_reader_export_test");
+        std::fs::create_dir_all(&custom_dir).unwrap();
+        state.export_dir = custom_dir.clone();
+        state.active_file = Some(PathBuf::from("custom.parquet"));
+        set_columns(&mut state, &["id"]);
+        state.rows = vec![RowView {
+            cells: vec![CellView::new("1".to_string())],
+        }];
+        state.export_current_page_csv();
+        let path = custom_dir.join("custom.page.csv");
+        assert!(path.exists(), "export file should exist in custom dir");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("#,id"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&custom_dir);
     }
 
     // P1.3: single candidate completion
