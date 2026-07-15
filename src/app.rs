@@ -362,11 +362,27 @@ impl AppState {
     pub fn total_rows_display(&self) -> String {
         match &self.count_state {
             CountState::Known(total) => total.to_string(),
-            CountState::Failed(_) => "!".to_string(),
+            CountState::Failed(_) => "count failed".to_string(),
             CountState::Unknown => self
                 .total_rows
-                .map_or_else(|| "?".to_string(), |total| total.to_string()),
+                .map_or_else(|| "unknown".to_string(), |total| total.to_string()),
         }
+    }
+
+    /// Build a display string for the current sort state.
+    ///
+    /// Returns `None` when no sort is active, or a string like `"name (asc)"`
+    /// showing the sorted column name and direction.
+    pub fn sort_display(&self) -> Option<String> {
+        self.sort_column.map(|col| {
+            let name = self
+                .columns
+                .get(col)
+                .map(|c| c.name.as_str())
+                .unwrap_or("?");
+            let direction = if self.sort_ascending { "asc" } else { "desc" };
+            format!("{name} ({direction})")
+        })
     }
 
     fn save_active_tab_state(&mut self) {
@@ -1076,8 +1092,12 @@ impl AppState {
         } else if self.active_file.is_none() {
             format!("{} | root: {}", self.status, self.root_dir.display())
         } else {
+            let sort_part = self
+                .sort_display()
+                .map(|s| format!(" | sort: {s}"))
+                .unwrap_or_default();
             format!(
-                "{} | rows {}-{} of {} | page {} | cols {} | filter {} | selected r{} c{}",
+                "{} | rows {}-{} of {} | page {} | cols {} | filter {} | selected r{} c{}{}",
                 self.status,
                 self.row_start_display(),
                 self.row_end_display(),
@@ -1087,6 +1107,7 @@ impl AppState {
                 self.filter_display(),
                 self.selected_row_display(),
                 self.selected_col_display(),
+                sort_part,
             )
         }
     }
@@ -1693,6 +1714,55 @@ mod tests {
         assert!(content.starts_with("#,id"));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&custom_dir);
+    }
+
+    // E2: sort_display shows column name and direction
+    #[test]
+    fn sort_display_shows_column_and_direction() {
+        let mut state = test_state();
+        set_columns(&mut state, &["name", "score"]);
+        assert_eq!(state.sort_display(), None);
+
+        state.sort_column = Some(1);
+        state.sort_ascending = true;
+        assert_eq!(state.sort_display().as_deref(), Some("score (asc)"));
+
+        state.sort_ascending = false;
+        assert_eq!(state.sort_display().as_deref(), Some("score (desc)"));
+    }
+
+    // E2: status_text includes sort info when active
+    #[test]
+    fn status_text_includes_sort_when_active() {
+        let mut state = test_state();
+        state.active_file = Some(PathBuf::from("file.parquet"));
+        set_columns(&mut state, &["name", "score"]);
+        state.rows = vec![single_row()];
+        state.sort_column = Some(1);
+        state.sort_ascending = false;
+        let text = state.status_text();
+        assert!(
+            text.contains("sort: score (desc)"),
+            "status should contain sort info: {text}"
+        );
+    }
+
+    // E2: total_rows_display shows readable messages
+    #[test]
+    fn total_rows_display_readable_states() {
+        let mut state = test_state();
+        state.count_state = CountState::Known(42);
+        assert_eq!(state.total_rows_display(), "42");
+
+        state.count_state = CountState::Unknown;
+        state.total_rows = None;
+        assert_eq!(state.total_rows_display(), "unknown");
+
+        state.total_rows = Some(100);
+        assert_eq!(state.total_rows_display(), "100");
+
+        state.count_state = CountState::Failed("scan error".to_string());
+        assert_eq!(state.total_rows_display(), "count failed");
     }
 
     // P1.3: single candidate completion

@@ -1248,7 +1248,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("  n / PageDown      Next page"),
         Line::from("  p / PageUp        Previous page"),
         Line::from("  o / O             Sort by selected column / toggle direction"),
-Line::from("  e                 Export current page to CSV (export-dir)"),
+        Line::from("  e                 Export current page to CSV (export-dir)"),
         Line::from("  Enter / Space     Open selected cell detail"),
         Line::from("  Double click      Open clicked cell detail"),
         Line::from("  y                 Copy selected cell via OSC52"),

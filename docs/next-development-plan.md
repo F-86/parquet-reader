@@ -1,6 +1,6 @@
 # parquet-reader 剩余开发计划
 
-> 最后更新：2026-07-15（E1 完成）
+> 最后更新：2026-07-15（E1 + E2 完成）
 > 说明：本文件现在只保留**截至当前仍未完成**的事项；原先已经完成的 P1-P5 内容已不再重复展开。
 
 本文档面向继续接手实现的 AI coding agent，用来回答两件事：
@@ -167,14 +167,12 @@ Evaluate DataFusion as an optional filter backend
 
 已完成：新增 `--export-dir` CLI 参数，默认回退到系统临时目录。`AppState` 持有 `export_dir` 字段，`export_current_page_csv` 使用该字段而非硬编码 `temp_dir()`。
 
-### E2：状态栏更明确显示排序 / count 状态
+### E2：状态栏更明确显示排序 / count 状态 ✅
 
-当前功能已经可用，但还可以进一步明确：
-
-- 当前是否处于页内排序；
-- 当前排序列和方向；
-- `CountState::Failed` 的可读提示；
-- 未知总数与已知总数的差异提示。
+已完成：
+- `sort_display()` 方法返回当前排序列名和方向（如 `name (asc)`），无排序时返回 `None`
+- `status_text` 在排序激活时追加 `| sort: <col> (<dir>)` 段
+- `total_rows_display` 改进：`CountState::Failed` 显示 `count failed`（原 `!`），`CountState::Unknown` 无元数据时显示 `unknown`（原 `?`），有元数据时显示元数据值
 
 ---
 
@@ -198,8 +196,10 @@ R1 ✅ > R3 ✅ > R2.1 ✅ > R2.2 ✅ > R2.3 ✅
 R2 全部子任务已完成。如果要继续推进，从增强项中挑选：
 
 ```text
-E1 ✅ > E2：状态栏更明确显示排序 / count 状态
+E1 ✅ > E2 ✅
 ```
+
+E1 和 E2 均已完成。当前开发计划中的所有待办事项已全部落地，无剩余任务。
 
 ---
 
