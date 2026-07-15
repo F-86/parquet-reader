@@ -195,15 +195,18 @@ impl ParquetFileDataSource {
             return Ok(builder.metadata().file_metadata().num_rows().max(0) as usize);
         };
 
+        let referenced = filter.referenced_columns();
+        let num_columns = schema.fields().len();
+
         let mut reader = builder.with_batch_size(1024).build()?;
         let mut count = 0usize;
         while let Some(batch) = reader.next().transpose()? {
             let columns = batch.columns();
             for row_index in 0..batch.num_rows() {
-                let typed: Vec<TypedValue> = columns
-                    .iter()
-                    .map(|array| extract_typed_value(array, row_index))
-                    .collect();
+                let mut typed = vec![TypedValue::Null; num_columns];
+                for &col_idx in &referenced {
+                    typed[col_idx] = extract_typed_value(&columns[col_idx], row_index);
+                }
                 if filter.matches_typed(&typed) {
                     count += 1;
                 }
@@ -239,23 +242,33 @@ fn append_batch_rows(
     filter: Option<&FilterAst>,
 ) {
     let columns = batch.columns();
+    let num_columns = columns.len();
+    // Pre-compute which columns the filter actually references so we
+    // only extract typed values for those columns, leaving the rest as
+    // Null.  This avoids needless extract_typed_value calls for columns
+    // that the filter never inspects.
+    let referenced: Vec<usize> = filter.map(|f| f.referenced_columns()).unwrap_or_default();
+
     for row_index in 0..batch.num_rows() {
         if rows.len() >= limit {
             break;
         }
-        let cells: Vec<CellView> = columns
-            .iter()
-            .map(|array| format_cell(Arc::clone(array), row_index))
-            .collect();
         if let Some(filter) = filter {
-            let typed: Vec<TypedValue> = columns
-                .iter()
-                .map(|array| extract_typed_value(array, row_index))
-                .collect();
+            let mut typed = vec![TypedValue::Null; num_columns];
+            for &col_idx in &referenced {
+                typed[col_idx] = extract_typed_value(&columns[col_idx], row_index);
+            }
             if !filter.matches_typed(&typed) {
                 continue;
             }
         }
+        // Only format cells for rows that survive the filter (or when no
+        // filter is active).  Rows that are filtered out skip formatting
+        // entirely.
+        let cells: Vec<CellView> = columns
+            .iter()
+            .map(|array| format_cell(Arc::clone(array), row_index))
+            .collect();
         if *skipped < offset {
             *skipped += 1;
             continue;
@@ -366,6 +379,22 @@ impl FilterAst {
                 left.matches_typed(values) && right.matches_typed(values)
             }
             FilterAst::Or(left, right) => left.matches_typed(values) || right.matches_typed(values),
+        }
+    }
+
+    /// Return the deduplicated set of column indices referenced by this
+    /// filter expression.  Only these columns need to be extracted for
+    /// matching; all others can be left as `TypedValue::Null`.
+    fn referenced_columns(&self) -> Vec<usize> {
+        match self {
+            FilterAst::Predicate(p) => vec![p.column_index],
+            FilterAst::And(left, right) | FilterAst::Or(left, right) => {
+                let mut cols = left.referenced_columns();
+                cols.extend(right.referenced_columns());
+                cols.sort_unstable();
+                cols.dedup();
+                cols
+            }
         }
     }
 }
@@ -949,5 +978,50 @@ mod tests {
         let expr = parse_filter("score contains 9", &cols).unwrap();
         assert!(expr.matches_typed(&typed_row(&[typed_num(98.5)])));
         assert!(!expr.matches_typed(&typed_row(&[typed_num(50.0)])));
+    }
+
+    #[test]
+    fn referenced_columns_single_predicate() {
+        let cols = columns(&["row_id", "score", "city"]);
+        let expr = parse_filter("score > 80", &cols).unwrap();
+        assert_eq!(expr.referenced_columns(), vec![1]);
+    }
+
+    #[test]
+    fn referenced_columns_and_combines_and_deduplicates() {
+        let cols = columns(&["row_id", "score", "city", "active"]);
+        let expr = parse_filter("score > 80 and city = 上海", &cols).unwrap();
+        assert_eq!(expr.referenced_columns(), vec![1, 2]);
+    }
+
+    #[test]
+    fn referenced_columns_same_column_in_or_deduplicates() {
+        let cols = columns(&["row_id", "score", "city"]);
+        let expr = parse_filter("score > 80 or score < 10", &cols).unwrap();
+        // Both predicates reference column index 1 ("score"); result should
+        // be deduplicated to a single entry.
+        assert_eq!(expr.referenced_columns(), vec![1]);
+    }
+
+    #[test]
+    fn minimal_matching_skips_unreferenced_columns() {
+        // When a filter only references column 1 ("score"), columns 0 and 2
+        // are left as Null.  The filter should still match correctly because
+        // it only inspects the referenced column.
+        let cols = columns(&["row_id", "score", "city"]);
+        let expr = parse_filter("score > 80", &cols).unwrap();
+        let referenced = expr.referenced_columns();
+        // Simulate the minimal extraction path: only extract column 1.
+        let mut typed = vec![TypedValue::Null; 3];
+        for &col_idx in &referenced {
+            typed[col_idx] = typed_num(95.0);
+        }
+        assert!(expr.matches_typed(&typed));
+
+        // Non-matching value
+        for &col_idx in &referenced {
+            typed[col_idx] = typed_num(50.0);
+        }
+        assert!(!expr.matches_typed(&typed));
     }
 }

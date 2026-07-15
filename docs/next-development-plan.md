@@ -1,6 +1,6 @@
 # parquet-reader 剩余开发计划
 
-> 最后更新：2026-07-14（R2.1 完成）
+> 最后更新：2026-07-15（R2.2 完成）
 > 说明：本文件现在只保留**截至当前仍未完成**的事项；原先已经完成的 P1-P5 内容已不再重复展开。
 
 本文档面向继续接手实现的 AI coding agent，用来回答两件事：
@@ -67,6 +67,11 @@
   - Null 值不匹配任何比较操作符
   - `append_batch_rows` 和 `count_with_filter` 统一使用 typed 路径
   - 新增 5 个 typed comparison 测试
+- R2.2：列级最小化匹配
+  - `FilterAst::referenced_columns()` 提取 filter AST 引用的列索引（去重）
+  - `append_batch_rows`：只对引用列做 `extract_typed_value`，其余列留 `Null`；格式化延迟到筛选通过后
+  - `count_with_filter`：同样只提取引用列的 typed value
+  - 新增 4 个测试：单谓词列提取、AND 去重、同列 OR 去重、最小匹配行为验证
 
 当前实现仍遵守以下长期约束：
 
@@ -123,11 +128,9 @@
 
 已完成：把 filter predicate 的比较下沉到结构化值层。覆盖数字、布尔、日期/时间/时间戳/Duration、Decimal。UI 语义不变。
 
-#### R2.2 列级最小化匹配
+#### R2.2 列级最小化匹配 ✅
 
-- 解析 filter AST 后，提取被引用列；
-- 匹配阶段只访问必要列数据；
-- 不改变当前分页接口语义。
+已完成：解析 filter AST 后提取被引用列，匹配阶段只访问必要列数据。不改变当前分页接口语义。
 
 #### R2.3 DataFusion 可行性调研（可选）
 
@@ -196,7 +199,7 @@ Evaluate DataFusion as an optional filter backend
 建议按以下顺序继续：
 
 ```text
-R1 ✅ > R3 ✅ > R2.1 ✅ > R2.2
+R1 ✅ > R3 ✅ > R2.1 ✅ > R2.2 ✅ > R2.3（可选）
 ```
 
 原因：
@@ -204,12 +207,13 @@ R1 ✅ > R3 ✅ > R2.1 ✅ > R2.2
 - **R1** 已完成：Cell Detail 内搜索已落地；
 - **R3** 已完成：状态机与 TUI 解耦已落地；
 - **R2.1** 已完成：类型化比较已落地；
+- **R2.2** 已完成：列级最小化匹配已落地；
 - **R2** 风险最高，适合在行为和分层更稳定后推进。
 
 如果要继续推进，优先选：
 
 ```text
-R2.2：列级最小化匹配
+R2.3：DataFusion 可行性调研（可选）
 ```
 
 ---
