@@ -158,7 +158,7 @@
 - 帮助弹窗是否需要搜索、分页或按上下文只显示当前模式快捷键。
 - 是否支持列选择、排序、单元格详情弹窗、导出当前页。
 - 是否需要为大型样例建立单独的性能测试集。
-- 后续是否引入 DataFusion 以获得谓词下推与更强查询能力（见 `docs/next-development-plan.md` P5.2）。
+- ~~后续是否引入 DataFusion 以获得谓词下推与更强查询能力（见 `docs/next-development-plan.md` P5.2）~~ → 已决策：暂不引入，详见 `docs/design/r2.3-datafusion-feasibility.md`
 
 ## 决策记录规则
 
